@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.json
+!Enphase/access_gen.json
+*.csv
+*.ipynb
+*.txt
+*.log
+logs
