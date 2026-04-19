@@ -83,7 +83,7 @@ def main():
     # ----------------------------
     # Refresh token if needed
     # ----------------------------
-    if should_refresh(creds["expires_at"]):
+    if should_refresh(creds.get("expires_at")):
         print("Refreshing access token...")
         new_tokens = refresh_access_token(
             client_id,
@@ -102,6 +102,10 @@ def main():
     # API request
     # ----------------------------
     site_id, user = get_site_id(access_token, api_key)
+
+    if not site_id:
+        print("Could not retrieve site_id. Skipping this cycle.")
+        return
 
     path = f"/api/v4/systems/inverters_summary_by_envoy_or_site?site_id={site_id}"
 
