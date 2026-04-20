@@ -59,6 +59,8 @@ EnPhase/logs/scheduler.log
 
 ## How to Run
 
+First enable virtual environment and install dependencies.
+
 ### 1. Run once (manual execution)
 
 From project root:
