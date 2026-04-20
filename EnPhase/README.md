@@ -158,23 +158,6 @@ This safely shuts down:
 
 ---
 
-## Python Version
-
-Python version = 3.11.9
-
-## Dependencies
-
-```bash
-cd SolarPanels
-python -m venv .venv
-# Windows
-.\.venv\Scripts\Activate
-# Linux/macOS
-source .venv/bin/activate
-pip install -r requirements.txt
-```
----
-
 ## Recommended Usage
 
 Development / Testing:
