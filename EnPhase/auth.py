@@ -7,7 +7,43 @@ from datetime import datetime, timedelta
 BASE_URL = "api.enphaseenergy.com"
 
 
-def refresh_access_token(client_id, client_secret, refresh_token, save_path):
+def update_tokens_file(save_path, new_tokens):
+    """
+    Updates only specific token fields in credentials.json
+    without overwriting the whole file.
+    """
+
+    with open(save_path, "r") as f:
+        existing = json.load(f)
+
+    existing["access_token"] = new_tokens.get("access_token")
+    existing["token_type"] = new_tokens.get("token_type")
+    existing["refresh_token"] = new_tokens.get("refresh_token")
+    existing["expires_in"] = new_tokens.get("expires_in")
+    existing["expires_at"] = (datetime.now() + timedelta(seconds=new_tokens["expires_in"])).isoformat()
+
+    with open(save_path, "w") as f:
+        json.dump(existing, f, indent=4)
+
+
+def compute_expiry_time(expires_in):
+    """
+    Converts expires_in seconds to absolute datetime.
+    """
+    return datetime.now() + timedelta(seconds=expires_in)
+
+def should_refresh(expires_at=None):
+    """
+    Returns True if current time is within 2 hours of expiry.
+    """
+    # Safe check in case the file gets corrupted or cleared
+    if not expires_at:
+        return True
+    expiry_time = datetime.fromisoformat(expires_at)
+    refresh_time = expiry_time - timedelta(hours=2)
+    return datetime.now() >= refresh_time
+
+def refresh_access_token(client_id, client_secret, refresh_token):
     """
     Uses refresh_token to generate new access_token and refresh_token.
     Overwrites saved credentials.json file.
@@ -34,17 +70,30 @@ def refresh_access_token(client_id, client_secret, refresh_token, save_path):
 
     tokens = json.loads(data)
 
-    # Save updated tokens
-    # with open(save_path, "w") as f:
-    #     json.dump(tokens, f, indent=4)
-
     return tokens
 
 if __name__ == "__main__":
-    with open("access_gen.json", "r") as f1:
-        creds1 = json.load(f1)
-    with open("credentials.json", "r") as f2:
-        creds2 = json.load(f2)
-    
-    returns = refresh_access_token(creds1["client_id"], creds1["client_secret"], creds2["refresh_token"], None)
-    print(returns)
+    CRED_PATH = "credentials.json"
+    API_PATH = "access_gen.json"
+
+    with open(API_PATH, "r") as f1:
+        api_creds = json.load(f1)
+
+    with open(CRED_PATH, "r") as f2:
+        creds = json.load(f2)
+
+    # Check if refresh needed
+    if should_refresh(creds["expires_at"]):
+        print("Refreshing token...")
+
+        new_tokens = refresh_access_token(
+            api_creds["client_id"],
+            api_creds["client_secret"],
+            creds["refresh_token"]
+        )
+
+        update_tokens_file(CRED_PATH, new_tokens)
+
+        print("Token refreshed and saved.")
+    else:
+        print("Token still valid.")
