@@ -38,8 +38,9 @@ if response.status_code == 200:
     save_dict = {
         "access_token": tokens.get("access_token"),
         "token_type": tokens.get("token_type"),
-        "refresh_token": expires_in_seconds,
-        "expires_in": expires_at
+        "refresh_token": tokens.get("refresh_token"),
+        "expires_in": expires_in_seconds,
+        "expires_at": expires_at
     }
     with open("credentials.json", "w") as f:
         json.dump(save_dict, f, indent=4)
