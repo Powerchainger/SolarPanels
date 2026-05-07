@@ -5,7 +5,7 @@ def get_site_id(access_token, API_KEY, token_type="Bearer"):
   headers = {
     'Authorization': f'{token_type} {access_token}'
   }
-  endpoint = f"/api/v4/systems?key={api_key}"
+  endpoint = f"/api/v4/systems?key={API_KEY}"
   try:
       conn.request("GET", endpoint, headers=headers)
       res = conn.getresponse()
