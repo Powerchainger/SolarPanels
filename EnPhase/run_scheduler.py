@@ -13,6 +13,7 @@ from EnPhase.cloud_measurements import main
 # ----------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+SESSION_CACHE = {"site_id": None, "user": None}
 os.makedirs(LOG_DIR, exist_ok=True)
 
 logger = logging.getLogger("scheduler")
@@ -36,15 +37,13 @@ logger.addHandler(console_handler)
 scheduler = BackgroundScheduler()
 running = True
 
-
 def job():
     logger.info("Starting hourly inverter data fetch")
     try:
-        main()
+        main(SESSION_CACHE)
         logger.info("Job completed successfully")
     except Exception as e:
         logger.exception(f"Job failed: {e}")
-
 
 def shutdown(sig=None, frame=None):
     global running
@@ -53,11 +52,8 @@ def shutdown(sig=None, frame=None):
     scheduler.shutdown(wait=False)
     logger.info("Scheduler stopped")
 
-
-# Register Ctrl+C handler
 signal.signal(signal.SIGINT, shutdown)
 signal.signal(signal.SIGTERM, shutdown)
-
 
 def start():
     scheduler.add_job(
