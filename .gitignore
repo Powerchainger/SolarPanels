@@ -6,5 +6,6 @@ __pycache__/
 *.csv
 *.ipynb
 *.txt
+!requirements.txt
 *.log
 logs
