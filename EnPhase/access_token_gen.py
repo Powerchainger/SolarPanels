@@ -1,8 +1,7 @@
 import requests, base64, json
 from datetime import datetime, timedelta
 
-# Use this for testing
-if __name__ == "__main__":
+def access_creds():    
     with open("access_gen.json", "r") as f:
         creds = json.load(f)
     client_id = creds["client_id"]
@@ -36,8 +35,9 @@ if __name__ == "__main__":
         save_dict = {
             "access_token": tokens.get("access_token"),
             "token_type": tokens.get("token_type"),
-            "refresh_token": expires_in_seconds,
-            "expires_in": expires_at
+            "refresh_token": tokens.get("refresh_token"),
+            "expires_in": expires_in_seconds,
+            "expires_at": expires_at
         }
         with open("credentials.json", "w") as f:
             json.dump(save_dict, f, indent=4)
@@ -45,3 +45,7 @@ if __name__ == "__main__":
     else:
         print(f"Failed! Status Code: {response.status_code}")
         print(f"Response: {response.text}")
+
+# Use this for testing
+if __name__ == "__main__":
+    access_creds()
