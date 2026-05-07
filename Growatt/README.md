@@ -75,3 +75,6 @@ From project root:
 python -m Growatt.run_scheduler
 
 ---
+
+Take a look at this repository (the essential function were taken from here):
+```https://github.com/indykoning/PyPi_GrowattServer/tree/master```
