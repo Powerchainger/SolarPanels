@@ -1,11 +1,12 @@
 import http.client
-import json, sys, os
-from datetime import datetime
+import json, os
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 
 from EnPhase.site_id import get_site_id
 from EnPhase.auth import should_refresh, refresh_access_token, update_tokens_file
+from EnPhase.access_token_gen import access_creds
 
 
 # CONSTANTS
@@ -19,38 +20,38 @@ def parse_inverter_data(raw_data, user):
     Parses raw Enphase API data and returns structured row + total power.
     """
 
-    # Check validity of JSON format
     try:
         json_data = json.loads(raw_data)
-    except json.JSONDecodeError:
+
+        if not json_data or "micro_inverters" not in json_data[0]:
+            return None, None
+
+        inverters = json_data[0]["micro_inverters"]
+
+        iso_timestamp = datetime.fromisoformat(
+            inverters[0]["last_report_date"]
+        )
+
+        local_timestamp = iso_timestamp.astimezone(
+            ZoneInfo("Europe/Amsterdam")
+        )
+
+        row = {"timestamp": local_timestamp}
+        total_power = 0
+
+        for i, inverter in enumerate(inverters):
+            power = inverter.get("power_produced", {}).get("value", 0)
+            row[f"inverter_{i+1}"] = power
+            total_power += power
+
+        row["total_power"] = total_power
+        row["user_value"] = user
+
+        return row, total_power
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        print(f"Parsing error: {e}")
         return None, None
-
-    # Check correct structure of valid JSON format
-    if not json_data or "micro_inverters" not in json_data[0]:
-        return None, None
-
-    inverters = json_data[0]["micro_inverters"]
-
-    iso_timestamp = datetime.fromisoformat(
-        inverters[0]["last_report_date"]
-    )
-
-    local_timestamp = iso_timestamp.astimezone(
-        ZoneInfo("Europe/Amsterdam")
-    )
-
-    row = {"timestamp": local_timestamp}
-    total_power = 0
-
-    for i, inverter in enumerate(inverters):
-        power = inverter["power_produced"]["value"]
-        row[f"inverter_{i+1}"] = power
-        total_power += power
-
-    row["total_power"] = total_power
-    row["user_value"] = user
-
-    return row, total_power
 
 def write_to_csv(row):
     """
@@ -66,19 +67,45 @@ def write_to_csv(row):
         index=False
     )
 
-def main():
+def main(cache=None):
     # ----------------------------
     # Load credentials
     # ----------------------------
-    with open(CRED_PATH, "r") as f:
-        creds = json.load(f)
+    try:
+        with open(API_PATH, "r") as f:
+            api_creds = json.load(f)
+        with open(CRED_PATH, "r") as f:
+            creds = json.load(f)
+    except FileNotFoundError:
+        access_creds()
+        with open(CRED_PATH, "r") as f:
+            creds = json.load(f)
 
-    with open(API_PATH, "r") as f:
-        api_creds = json.load(f)
+    if cache and cache.get("site_id"):
+        site_id = cache["site_id"]
+        user = cache["user"]
+    else:
+        print("Site ID not in memory. Fetching for this session...")
+        site_id, user = get_site_id(creds["access_token"], api_creds["api_key"])
+        if cache is not None and site_id:
+            cache["site_id"] = site_id
+            cache["user"] = user
+
+    if not site_id:
+        print("Error: Could not retrieve site_id. Aborting job.")
+        return
 
     client_id = api_creds["client_id"]
     client_secret = api_creds["client_secret"]
     api_key = api_creds["api_key"]
+
+    if "expires_at" not in creds:
+        print("Missing 'expires_at'. Creating it from current 'expires_in'...")
+        seconds = creds.get("expires_in", 86399) # day in seconds
+        expiry_date = datetime.now() + timedelta(seconds=seconds)
+        creds["expires_at"] = expiry_date.isoformat()
+        with open(CRED_PATH, "w") as f:
+            json.dump(creds, f, indent=4)
 
     # ----------------------------
     # Refresh token if needed
@@ -101,7 +128,6 @@ def main():
     # ----------------------------
     # API request
     # ----------------------------
-    site_id, user = get_site_id(access_token, api_key)
 
     if not site_id:
         print("Could not retrieve site_id. Skipping this cycle.")
@@ -133,6 +159,5 @@ def main():
         conn.close()
 
 
-# Entry point
 if __name__ == "__main__":
-    main()
+    main(cache=None)

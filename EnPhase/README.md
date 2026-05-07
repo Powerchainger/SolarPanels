@@ -106,8 +106,7 @@ user_value     → site/user name
   "access_token": "...",
   "token_type": "Bearer",
   "refresh_token": "...",
-  "expires_in": 86399,
-  "expires_at": "2026-04-17T13:36:00.000"
+  "expires_in": "...."
 }
 ```
 ### access_gen.json
@@ -183,6 +182,15 @@ python -m EnPhase.run_scheduler
     - "auth_code"
     - "api_key"
 ```
+- **TESTING**:  
+    - place the above in a new file named ```access_gen.json```
+    - run ```access_token_gen.py ``` -> copy the log output in a new ```credentials.json```
+    - run ```EnPhase.scheduler``` (continuous 1-houer calls) or ```cloud_measurements.py``` (one-time call)
+
+- **IMPORTANT** : 
+    - Generate as fast as possible the credentials because ```auth_code``` expires very fast and if it does the user has to repeat the steps for the URL.
+    - If ```refresh_token``` expires then the whole process needs to be done from the start (this should happen in case you have credentials but didn't use them for a month)
+
 
 ## Future Improvements
 
