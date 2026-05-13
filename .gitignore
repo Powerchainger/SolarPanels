@@ -11,3 +11,6 @@ logs
 
 # nix
 .direnv
+
+# secrets
+.env
