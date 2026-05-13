@@ -213,15 +213,15 @@ project/
 │                            #   init Mongo indexes, build scheduler from
 │                            #   claimed accounts, install signal handlers,
 │                            #   run forever
-├── Dockerfile               # python:3.13-slim multi-stage, non-root user
+├── Dockerfile               # python:3.13-slim + uv, multi-stage, non-root
+│                            #   user; installs deps via `uv sync --no-dev`
 ├── docker-compose.yml       # app + mongo (named volume, healthcheck);
 │                            #   for multi-machine: run app as separate
 │                            #   containers with distinct WORKER_ID,
 │                            #   all pointing at the same MONGO_URI
-├── requirements.txt         # httpx, motor, pymongo, pydantic,
-│                            #   pydantic-settings, apscheduler, tenacity,
-│                            #   growattServer, typer, python-dateutil,
-│                            #   tzdata, respx (test)
+├── pyproject.toml           # dependency spec and project metadata
+├── uv.lock                  # pinned lockfile (committed); regenerate with
+│                            #   `uv sync` — source of truth for Docker too
 └── .env.example             # MONGO_URI=mongodb://mongo:27017
                              # OUTPUT_API_URL=
                              # OUTPUT_API_TOKEN=

@@ -1,0 +1,27 @@
+[project]
+name = "solar-scraper"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "httpx>=0.28",
+    "motor>=3.6",
+    "pymongo>=4.9",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "apscheduler>=3.10,<4",   # 4.x has a completely different API; pin to 3.x
+    "tenacity>=8.5",
+    "growattServer>=2.1.0",
+    "typer>=0.12",
+    "python-dateutil>=2.9",
+    "tzdata>=2024.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "respx>=0.21",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
