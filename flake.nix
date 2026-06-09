@@ -21,6 +21,7 @@
           env = {
             # Pin uv to the nix-provided Python so it never downloads its own.
             UV_PYTHON = "${python}/bin/python3.13";
+            LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
           };
 
           shellHook = ''
