@@ -16,7 +16,6 @@ def write_to_csv(rows):
     pd.DataFrame(rows).to_csv(CSV_FILE, mode="a", header=not file_exists, index=False)
 
 def fetch_and_log():
-    # All device samples should be logged with the same timestep
     master_now = datetime.now(ZoneInfo("Europe/Amsterdam")).replace(microsecond=0).isoformat()
     
     with open(CREDS_PATH, "r") as f:
@@ -36,7 +35,7 @@ def fetch_and_log():
         
         print(f"--- Starting Sample Run: {master_now} ---")
 
-        for device in devices.get("devices", []): # iterate through all inverters in plant
+        for device in devices.get("devices", []): 
             sn = device["device_sn"]
             if device["type"] != 7:
                 print(f"Skipping {sn} (Type {device['type']})")
