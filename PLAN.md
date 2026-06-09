@@ -198,6 +198,49 @@ The system is designed for **multiple worker machines**, each responsible for a 
 
 16. **Don't copy `EnPhase/auth.py` and `access_token_gen.py` verbatim.** They have merge conflicts and use `http.client` synchronously. Rewrite as small async functions in `clients/api_a.py` using httpx. The logic is short and well-understood from the existing code; reimplementation is lower risk than untangling the conflict.
 
+### Schema / model implementation decisions
+
+Choices realised in `db/models.py` while building the Pydantic models:
+
+- **Discriminated union on `credentials.provider`** — Pydantic uses the `provider` key
+  inside the credentials dict to pick which model to instantiate, giving precise validation
+  errors instead of a confusing "tried X, tried Y" message.
+- **`model_validator` on `ApiConfig`** — enforces that `credentials.provider` matches the
+  outer `provider` field, catching the case where an enphase config doc is accidentally
+  paired with growatt credentials.
+- **`StrEnum` for `RecordStatus`** — members are plain strings, so they round-trip through
+  MongoDB without any serialisation step.
+- **`default_factory=lambda: datetime.now(UTC)` on `created_at`/`updated_at`** —
+  auto-populates when creating new documents in code, but uses the stored value when
+  loading from MongoDB.
+
+### Provider extensibility
+
+Adding a third upstream provider should touch two layers, kept deliberately separate:
+
+- **Model layer (`db/models.py`)** — add a new `XCredentials` model with
+  `provider: Literal["x"]`, add `"x"` to `ApiConfig.provider`, and add the new model to the
+  `credentials` discriminated union. This stays a *static* Pydantic union on purpose: a
+  runtime registry cannot replace it without losing the precise per-provider validation
+  errors that the discriminated union gives us. The edit is one line per location.
+
+- **Orchestration layer (`providers.py`)** — a single dispatch registry maps each provider
+  name to a `ProviderSpec(credentials_class, client_factory, transform_fn)`. The scheduler
+  (`scheduler/jobs.py`), the transform pipeline, and `manage_keys.py` look up the spec
+  instead of branching on the provider string. Adding a provider is then one registry entry
+  plus its three implementation files (client, credentials model, transform function) — no
+  `if/elif` chains anywhere.
+
+Deliberately **not** a unified `Provider` ABC that bundles fetch + transform: that would
+collapse the client/transform seam that IMPL.md Step 4 relies on (transforms are pure
+functions testable against fixture JSON with no network). The registry sits *above* that
+seam — it does not erase it.
+
+The registry is introduced at **Step 9**, when `scheduler/jobs.py` first needs to dispatch
+by provider. Writing that dispatch as a dict from the start costs nothing and avoids a
+later refactor; it is not worth adding earlier, while only two providers exist in
+still-unwritten code.
+
 ### Python version
 
 The existing repo's README pins `3.11.9`. `growattServer` 2.1.0 declares no `Requires-Python` and only the generic `Programming Language :: Python :: 3` classifier — so it does not constrain us. Pick the most recent Python that the whole stack (growattServer + motor + httpx + apscheduler + pydantic v2 + tenacity) has stable wheels for, to delay re-bumping when 3.11 hits end-of-life:

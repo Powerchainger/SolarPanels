@@ -101,8 +101,16 @@ Build `scheduler/jobs.py`: `AsyncIOScheduler` with one job per enabled
 (`hash(account_id) % interval_seconds`); plus a flush job for
 `status ∈ {pending, failed}` with per-worker jitter.
 
+Also build `providers.py`: a dispatch registry mapping each provider name to a
+`ProviderSpec(credentials_class, client_factory, transform_fn)`. The scheduler dispatches
+by lookup rather than an `if/elif` chain on the provider string, so a future provider is
+one registry entry plus its implementation files. The transform pipeline and
+`manage_keys.py` consume the same registry. See PLAN.md → "Provider extensibility" for the
+rationale (and why this is *not* a unified `Provider` ABC).
+
 Done when: two accounts with different intervals each get a job registered; a manually
-inserted `failed` record transitions to `posted` after the flush job fires.
+inserted `failed` record transitions to `posted` after the flush job fires; the scheduler
+resolves both providers through the `providers.py` registry with no provider branching.
 
 ---
 
@@ -205,6 +213,12 @@ project/
 │                            #   api_configs; one job per enabled
 │                            #   (provider, account_id); flush job for
 │                            #   status ∈ {pending, failed}
+├── providers.py             # Dispatch registry: provider name →
+│                            #   ProviderSpec(credentials_class,
+│                            #   client_factory, transform_fn). Scheduler,
+│                            #   pipeline, and manage_keys look up here
+│                            #   instead of branching on provider string.
+│                            #   Introduced at Step 9 (see PLAN.md).
 ├── manage_keys.py           # CLI: enphase bootstrap / growatt set /
 │                            #   list / delete (keyed on --account-id)
 ├── main.py                  # Entrypoint: claim leases for WORKER_ID,
