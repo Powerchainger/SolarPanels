@@ -1,18 +1,17 @@
 # Python Version
 
-Python version = 3.11.9
+Python 3.13 (pinned via `requires-python` in `pyproject.toml`).
 
 # Dependencies
 
+The project uses [uv](https://docs.astral.sh/uv/) for dependency management, inside a
+nix-provided shell. From the nix shell, a single command sets up a full development
+environment (including the dev extras — pytest, respx, etc.):
+
 ```bash
-cd SolarPanels
-python -m venv .venv
-# Windows
-.\.venv\Scripts\Activate
-# Linux/macOS
-source .venv/bin/activate
-pip install -r requirements.txt
+uv sync --extra dev
 ```
+
 ---
 
 Check README.md files inside each folder on how to run inverter scripts. 
