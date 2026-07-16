@@ -68,80 +68,103 @@ def write_to_csv(row):
     )
 
 def main(cache=None):
-    # ----------------------------
+    # -------------------------------------------------------------------------
     # Load credentials
-    # ----------------------------
+    # -------------------------------------------------------------------------
     try:
         with open(API_PATH, "r") as f:
             api_creds = json.load(f)
         with open(CRED_PATH, "r") as f:
             creds = json.load(f)
     except FileNotFoundError:
+        print("Credentials file missing. Initializing new authorization session...")
         access_creds()
         with open(CRED_PATH, "r") as f:
             creds = json.load(f)
-
-    if cache and cache.get("site_id"):
-        site_id = cache["site_id"]
-        user = cache["user"]
-    else:
-        print("Site ID not in memory. Fetching for this session...")
-        site_id, user = get_site_id(creds["access_token"], api_creds["api_key"])
-        if cache is not None and site_id:
-            cache["site_id"] = site_id
-            cache["user"] = user
-
-    if not site_id:
-        print("Error: Could not retrieve site_id. Aborting job.")
-        return
 
     client_id = api_creds["client_id"]
     client_secret = api_creds["client_secret"]
     api_key = api_creds["api_key"]
 
     if "expires_at" not in creds:
-        print("Missing 'expires_at'. Creating it from current 'expires_in'...")
-        seconds = creds.get("expires_in", 86399) # day in seconds
+        print("Missing 'expires_at'. Deriving timestamp from 'expires_in'...")
+        seconds = creds.get("expires_in", 86399)
         expiry_date = datetime.now() + timedelta(seconds=seconds)
         creds["expires_at"] = expiry_date.isoformat()
         with open(CRED_PATH, "w") as f:
             json.dump(creds, f, indent=4)
 
-    # ----------------------------
-    # Refresh token if needed
-    # ----------------------------
+    # -------------------------------------------------------------------------
+    # Token Validation & Preventive Refresh (Must Happen FIRST)
+    # -------------------------------------------------------------------------
     if should_refresh(creds.get("expires_at")):
-        print("Refreshing access token...")
-        new_tokens = refresh_access_token(
-            client_id,
-            client_secret,
-            creds["refresh_token"]
-        )
-        update_tokens_file(CRED_PATH, new_tokens)
-        # Reload updated credentials (cleaner than update())
-        with open(CRED_PATH, "r") as f:
-            creds = json.load(f)
+        print("Tokens outdated according to timestamp. Executing planned refresh...")
+        try:
+            new_tokens = refresh_access_token(client_id, client_secret, creds["refresh_token"])
+            update_tokens_file(CRED_PATH, new_tokens)
+            with open(CRED_PATH, "r") as f:
+                creds = json.load(f)
+        except Exception as e:
+            print(f"Preventive token refresh failed ({e}). Forcing hard reset...")
+            if os.path.exists(CRED_PATH):
+                os.remove(CRED_PATH)
+            access_creds()
+            with open(CRED_PATH, "r") as f:
+                creds = json.load(f)
 
     access_token = creds["access_token"]
-    token_type = creds["token_type"]
+    token_type = creds["token_type"].title()
 
-    # ----------------------------
-    # API request
-    # ----------------------------
+    # -------------------------------------------------------------------------
+    # Handle Site ID Cache / Fetching (Safe now because tokens are fresh)
+    # -------------------------------------------------------------------------
+    if cache and cache.get("site_id"):
+        site_id = cache["site_id"]
+        user = cache["user"]
+    else:
+        print("Site ID not found in memory cache. Fetching from Enphase API...")
+        site_id, user = get_site_id(access_token, api_key, token_type)
+        
+        #EMERGENCY BACKUP: If the API still rejects us
+        if site_id is None:
+            print("Token unexpectedly rejected (401). Attempting emergency refresh...")
+            try:
+                new_tokens = refresh_access_token(client_id, client_secret, creds["refresh_token"])
+                update_tokens_file(CRED_PATH, new_tokens)
+                with open(CRED_PATH, "r") as f:
+                    creds = json.load(f)
+                access_token = creds["access_token"]
+                token_type = creds["token_type"].title()
+                
+                print("Retrying Site ID fetch with fresh credentials...")
+                site_id, user = get_site_id(access_token, api_key, token_type)
+            except Exception as re_err:
+                print(f"Refresh token is entirely dead ({re_err}). Resetting credentials file...")
+                if os.path.exists(CRED_PATH):
+                    os.remove(CRED_PATH)
+                access_creds()
+                return
+
+        #Commit to memory cache if successfully retrieved
+        if cache is not None and site_id:
+            cache["site_id"] = site_id
+            cache["user"] = user
+
 
     if not site_id:
         print("Could not retrieve site_id. Skipping this cycle.")
         return
 
+    # -------------------------------------------------------------------------
+    # Execute Inverter Metrics API Request
+    # -------------------------------------------------------------------------
     path = f"/api/v4/systems/inverters_summary_by_envoy_or_site?site_id={site_id}"
-
     headers = {
         "Authorization": f"{token_type} {access_token}",
         "key": api_key
     }
 
     conn = http.client.HTTPSConnection("api.enphaseenergy.com")
-
     try:
         conn.request("GET", path, "", headers)
         res = conn.getresponse()
@@ -152,9 +175,9 @@ def main(cache=None):
                 print("Invalid JSON or missing data")
                 return
             write_to_csv(row)
-            print(f"Total current power produced: {total_power}")
+            print(f"Total current system generation: {total_power}W")
         else:
-            print(f"Error {res.status}: {raw_data}")
+            print(f"API Connection Rejected ({res.status}): {raw_data}")
     finally:
         conn.close()
 
