@@ -106,7 +106,8 @@ user_value     → site/user name
   "access_token": "...",
   "token_type": "Bearer",
   "refresh_token": "...",
-  "expires_in": "...."
+  "expires_in": "...",
+  "expires_at": "..."
 }
 ```
 ### access_gen.json
@@ -174,7 +175,7 @@ python -m EnPhase.run_scheduler
 ## Input from user
 
 - User has to follow the procedure until step 7, in this [URL](https://developer-v4.enphase.com/docs/quickstart.html)
-- Send us to following information:
+- Send us the following information:
 ```bash
     - "client_id"
     - "client_secret"
@@ -196,6 +197,6 @@ python -m EnPhase.run_scheduler
 
 
 - SQLite instead of CSV storage
-- Real-time dashboard (Plotly / Grafana)
+- Real-time dashboard (Grafana)
 - Email/Telegram alerts on failures
 - Cloud deployment (Raspberry Pi / VPS)
