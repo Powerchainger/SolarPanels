@@ -46,15 +46,27 @@ def enphase_bootstrap(
     client_secret: str = typer.Option(..., "--client-secret", help="EnPhase OAuth client_secret"),
     redirect_uri: str = typer.Option(..., "--redirect-uri", help="EnPhase OAuth redirect_uri"),
     api_key: str = typer.Option(..., "--api-key", help="EnPhase API key"),
+    access_token: str | None = typer.Option(None, "--access-token", help="Pre-exchanged access token (optional)"),
+    refresh_token: str | None = typer.Option(None, "--refresh-token", help="Pre-exchanged refresh token (optional)"),
+    expires_in: int | None = typer.Option(None, "--expires-in", help="Token lifetime in seconds (required with --access-token)"),
     interval: int = typer.Option(3600, "--interval", help="Poll interval in seconds"),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
 ) -> None:
-    """Seed an EnPhase account. Tokens will be exchanged by the running service."""
+    """Seed an EnPhase account. Pass --access-token/--refresh-token/--expires-in to skip auth_code exchange."""
+    expires_at = None
+    if access_token and expires_in:
+        from datetime import UTC, datetime, timedelta
+        expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
+
     creds = EnphaseCredentials(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
         api_key=api_key,
+        access_token=access_token or "",
+        refresh_token=refresh_token or "",
+        expires_in=expires_in,
+        expires_at=expires_at,
     )
     cfg = ApiConfig(
         provider="enphase",

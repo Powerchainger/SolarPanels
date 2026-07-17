@@ -85,10 +85,12 @@ async def fetch_job(
 
     now = datetime.now(UTC)
     context: dict[str, Any] = {"timestamp": now}
+    if api_config.site_cache:
+        context["site_name"] = api_config.site_cache.user
 
     # --- Fetch ---------------------------------------------------------------
     try:
-        raw_responses = await spec.fetch(api_config)
+        raw_responses = await spec.fetch(api_config, db, http_client)
     except Exception:
         logger.exception("fetch failed for %s", doc_id)
         return

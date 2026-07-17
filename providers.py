@@ -28,15 +28,22 @@ from db.models import (
 
 logger = logging.getLogger(__name__)
 
+from pymongo.asynchronous.database import AsyncDatabase
+from clients.base import TimedClient
+
 # Type aliases for the signatures the scheduler expects.
 #
-# FetchFn receives an ApiConfig and returns a list of (label, raw_dict) pairs.
+# FetchFn receives an ApiConfig, db handle, and http client; returns
+#   a list of (label, raw_dict) pairs.
 #   - For Growatt: label = device_sn, raw = min_energy dict.
 #   - For EnPhase: label = "inverter_summary", raw = full response array.
 #
 # TransformFn receives the raw fetch output and a context dict, returns
 #   a list of row dicts (ready for ProcessedRecord.record).
-FetchFn = Callable[[ApiConfig], Awaitable[list[tuple[str, dict[str, Any]]]]]
+FetchFn = Callable[
+    [ApiConfig, AsyncDatabase, TimedClient],
+    Awaitable[list[tuple[str, dict[str, Any]]]],
+]
 ContextDict = dict[str, Any]
 TransformFn = Callable[
     [list[tuple[str, dict[str, Any]]], ContextDict],
@@ -58,7 +65,11 @@ class ProviderSpec:
 # ---------------------------------------------------------------------------
 
 
-async def _growatt_fetch(cfg: ApiConfig) -> list[tuple[str, dict[str, Any]]]:
+async def _growatt_fetch(
+    cfg: ApiConfig,
+    _db: AsyncDatabase,
+    _client: TimedClient,
+) -> list[tuple[str, dict[str, Any]]]:
     """Fetch a full cycle for one Growatt account."""
     from clients.growatt import fetch_cycle
 
@@ -84,29 +95,37 @@ def _growatt_transform(
 
 
 # ---------------------------------------------------------------------------
-# EnPhase (placeholder — real implementation at Step 10)
+# EnPhase
 # ---------------------------------------------------------------------------
 
 
-async def _enphase_fetch(cfg: ApiConfig) -> list[tuple[str, dict[str, Any]]]:
+async def _enphase_fetch(
+    cfg: ApiConfig,
+    db: AsyncDatabase,
+    client: TimedClient,
+) -> list[tuple[str, dict[str, Any]]]:
     """Fetch inverter summary for one EnPhase account.
 
-    Placeholder — the real implementation (OAuth refresh, site_id lookup,
-    httpx-based fetch) is built at Step 10.  For now this raises so the
-    scheduler logs a clear error rather than silently succeeding with None.
+    Handles token refresh, site_id resolution, and the actual API call
+    via clients/enphase.py.
     """
-    raise NotImplementedError("EnPhase client not yet implemented (Step 10)")
+    from clients.enphase import fetch_cycle
+
+    return await fetch_cycle(db, cfg, client)
 
 
 def _enphase_transform(
     raw_responses: list[tuple[str, dict[str, Any]]],
     context: ContextDict,
 ) -> list[dict[str, Any]]:
-    """Transform raw EnPhase response into EnphaseRow dicts.
+    """Transform raw EnPhase response into EnphaseRow dicts."""
+    from transform.pipeline import parse_enphase
 
-    Placeholder — real implementation at Step 10.
-    """
-    raise NotImplementedError("EnPhase transform not yet implemented (Step 10)")
+    site_name = context.get("site_name", "")
+    rows = []
+    for _label, raw_body in raw_responses:
+        rows.extend(parse_enphase(raw_body, site_name=site_name))
+    return [r.model_dump(mode="json") for r in rows]
 
 
 # ---------------------------------------------------------------------------
