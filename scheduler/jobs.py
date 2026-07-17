@@ -99,6 +99,15 @@ async def fetch_job(
         logger.debug("empty fetch result for %s", doc_id)
         return
 
+    # Re-read api_config after fetch — provider may have updated site_cache,
+    # credentials, etc. in Mongo (e.g. EnPhase resolve_site_id runs during fetch).
+    fresh_doc = await db.api_configs.find_one({"_id": doc_id})
+    if fresh_doc:
+        fresh_doc.pop("_id", None)
+        api_config = ApiConfig(**fresh_doc)
+        if api_config.site_cache:
+            context["site_name"] = api_config.site_cache.user
+
     # --- Store raw responses (optional) --------------------------------------
     if api_config.store_raw:
         for label, raw_body in raw_responses:
