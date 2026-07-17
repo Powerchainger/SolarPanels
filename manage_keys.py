@@ -8,6 +8,11 @@ Commands:
   delete             Remove an api_configs document by (provider, account_id).
 
 No live API calls are made by this script — it only reads/writes MongoDB.
+
+Sensitive values (client_secret, access/refresh tokens, api_token) are
+prompted with hidden input when not passed via flags, preventing them
+from appearing in shell history.  Alternatively, use --from-file with
+a JSON file to supply all values at once (also no history).
 """
 
 from __future__ import annotations
@@ -16,7 +21,8 @@ import asyncio
 import json
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import typer
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
@@ -34,6 +40,11 @@ def _mongo():
     return client[DB_NAME]
 
 
+def _prompt_secret(label: str) -> str:
+    """Prompt for a sensitive value with hidden input."""
+    return typer.prompt(label, hide_input=True)
+
+
 # ---------------------------------------------------------------------------
 # enphase bootstrap
 # ---------------------------------------------------------------------------
@@ -42,20 +53,73 @@ def _mongo():
 @app.command("enphase-bootstrap")
 def enphase_bootstrap(
     account_id: str = typer.Option(..., "--account-id", help="Unique account identifier"),
-    client_id: str = typer.Option(..., "--client-id", help="EnPhase OAuth client_id"),
-    client_secret: str = typer.Option(..., "--client-secret", help="EnPhase OAuth client_secret"),
-    redirect_uri: str = typer.Option(..., "--redirect-uri", help="EnPhase OAuth redirect_uri"),
-    api_key: str = typer.Option(..., "--api-key", help="EnPhase API key"),
-    access_token: str | None = typer.Option(None, "--access-token", help="Pre-exchanged access token (optional)"),
-    refresh_token: str | None = typer.Option(None, "--refresh-token", help="Pre-exchanged refresh token (optional)"),
+    client_id: str | None = typer.Option(None, "--client-id", help="EnPhase OAuth client_id"),
+    client_secret: str | None = typer.Option(
+        None, "--client-secret",
+        help="EnPhase OAuth client secret (prompted with hidden input if omitted)",
+    ),
+    redirect_uri: str | None = typer.Option(None, "--redirect-uri", help="EnPhase OAuth redirect_uri"),
+    api_key: str | None = typer.Option(None, "--api-key", help="EnPhase API key"),
+    access_token: str | None = typer.Option(
+        None, "--access-token",
+        help="Pre-exchanged access token (prompted with hidden input if omitted)",
+    ),
+    refresh_token: str | None = typer.Option(
+        None, "--refresh-token",
+        help="Pre-exchanged refresh token (prompted with hidden input if omitted)",
+    ),
     expires_in: int | None = typer.Option(None, "--expires-in", help="Token lifetime in seconds (required with --access-token)"),
+    from_file: Path | None = typer.Option(
+        None, "--from-file",
+        help="Read all credential values from a JSON file instead of flags/prompts",
+        exists=True,
+    ),
     interval: int = typer.Option(3600, "--interval", help="Poll interval in seconds"),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
 ) -> None:
-    """Seed an EnPhase account. Pass --access-token/--refresh-token/--expires-in to skip auth_code exchange."""
+    """Seed an EnPhase account.
+
+    Sensitive fields (client_secret, access_token, refresh_token) are
+    prompted with hidden input if not passed as flags.  Use --from-file
+    to load all values from a JSON file (no prompts, no history).
+
+    JSON file format:
+    {
+      "client_id": "...", "client_secret": "...",
+      "redirect_uri": "...", "api_key": "...",
+      "access_token": "...", "refresh_token": "...",
+      "expires_in": 86399
+    }
+    """
+    # Load from file if provided — overrides all flags except account_id/interval/enabled.
+    if from_file:
+        data = json.loads(from_file.read_text())
+        client_id = data.get("client_id", client_id)
+        client_secret = data.get("client_secret", client_secret)
+        redirect_uri = data.get("redirect_uri", redirect_uri)
+        api_key = data.get("api_key", api_key)
+        access_token = data.get("access_token", access_token)
+        refresh_token = data.get("refresh_token", refresh_token)
+        expires_in = data.get("expires_in", expires_in)
+
+    # Prompt for missing non-sensitive fields (plain input).
+    if not client_id:
+        client_id = typer.prompt("Client ID")
+    if not redirect_uri:
+        redirect_uri = typer.prompt("Redirect URI")
+    if not api_key:
+        api_key = typer.prompt("API key")
+
+    # Prompt for missing sensitive fields (hidden input).
+    if not client_secret:
+        client_secret = _prompt_secret("Client secret")
+    if not access_token:
+        access_token = _prompt_secret("Access token")
+    if not refresh_token:
+        refresh_token = _prompt_secret("Refresh token")
+
     expires_at = None
     if access_token and expires_in:
-        from datetime import UTC, datetime, timedelta
         expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
 
     creds = EnphaseCredentials(
@@ -87,11 +151,30 @@ def enphase_bootstrap(
 @app.command("growatt-set")
 def growatt_set(
     account_id: str = typer.Option(..., "--account-id", help="Unique account identifier"),
-    api_token: str = typer.Option(..., "--api-token", help="Growatt API token (static)"),
+    api_token: str | None = typer.Option(
+        None, "--api-token",
+        help="Growatt API token (prompted with hidden input if omitted)",
+    ),
+    from_file: Path | None = typer.Option(
+        None, "--from-file",
+        help="Read values from a JSON file: {\"api_token\": \"...\"}",
+        exists=True,
+    ),
     interval: int = typer.Option(300, "--interval", help="Poll interval in seconds"),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
 ) -> None:
-    """Create or update a Growatt account with a static API token."""
+    """Create or update a Growatt account with a static API token.
+
+    api_token is prompted with hidden input if not passed as a flag.
+    Use --from-file to load from a JSON file (no prompts, no history).
+    """
+    if from_file:
+        data = json.loads(from_file.read_text())
+        api_token = data.get("api_token", api_token)
+
+    if not api_token:
+        api_token = _prompt_secret("API token")
+
     creds = GrowattCredentials(api_token=api_token)
     cfg = ApiConfig(
         provider="growatt",
