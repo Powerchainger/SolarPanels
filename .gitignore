@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 *.json
-!Enphase/access_gen.json
+Enphase/access_gen.json
 *.csv
 *.ipynb
 *.txt
@@ -14,4 +14,4 @@ logs
 
 # secrets
 .env
-**/credentials.json
+**/credentials.*
