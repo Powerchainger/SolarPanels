@@ -13,8 +13,11 @@ dependencies = [
     "typer>=0.12",
     "python-dateutil>=2.9",
     "tzdata>=2024.2",
-    "pandas>=3.0.5",
 ]
+
+[project.scripts]
+manage-keys = "manage_keys:app"
+dev = "dev:app"
 
 [project.optional-dependencies]
 dev = [
