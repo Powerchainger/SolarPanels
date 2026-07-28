@@ -60,6 +60,7 @@ podman compose up --build
 uv run pytest tests/
 
 # Echo server — prints received records to terminal
+# Make sure to set the .env `OUTPUT_API_URL` to http://127.0.0.1:[PORT] (default 8080)
 uv run python dev.py serve
 uv run python dev.py serve --port 9999
 
