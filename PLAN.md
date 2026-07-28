@@ -69,7 +69,7 @@ Two prerequisite findings before any of this is built:
                      └────────────────┘
 
  * thread = asyncio.to_thread wrapping growattServer.OpenApiV1
-   Upgrade path: replace with native httpx in clients/api_b.py only.
+   Upgrade path: replace with native httpx in clients/growatt.py only.
 ```
 
 ## Summary of the two source APIs
@@ -100,15 +100,70 @@ Two prerequisite findings before any of this is built:
 
 The proposed architecture is sound. Below are the deltas and improvements to bake in.
 
+### Resolutions against the product-owner requirements
+
+Where this plan deviates from the product owner's bullet list, the deviation is deliberate:
+
+- **`posted` boolean → status enum.** With both a scheduler tick and a periodic flush job,
+  a boolean cannot express "in flight" and double-posts when they race. The
+  `{pending, posting, posted, failed}` enum with an atomic claim-to-`posting` transition
+  (improvement 3 below) is required, not gold-plating.
+- **"Last response only" for `processed_results` — rejected.** It is incompatible with the
+  retry/flush requirement from the same list: the backlog of unposted records *is* the
+  recovery mechanism when the output API is down. Keeping only the last record loses data
+  on any outage longer than one cycle. If storage becomes a concern, add a TTL on
+  `status=posted` records only — the unposted backlog must stay.
+- **"Last response only" for `raw_responses` — TTL is better and equally cheap.** Raw
+  responses exist for debugging, and the bug usually happened a few cycles ago. Growatt at
+  5-minute cadence is ~288 docs/day/account at a few KB each — under 1 MB/day/account.
+  A 30-day TTL index plus the per-account `store_raw` opt-out dominates last-only.
+- **"One job per API" → one job per (provider, account_id).** Intervals, credentials, and
+  leases are all per-account; `max_instances=1` per account gives overlap protection
+  without serialising unrelated accounts behind each other.
+- **"CLI script … Also API call" — needs clarification from the product owner.** If it
+  means the CLI performs the EnPhase auth-code exchange API call, the plan covers it
+  (`enphase bootstrap`, improvement 15). If it means an *HTTP admin API* for key
+  management: pushed back — that is a network-exposed credentials-write path needing its
+  own auth, for something an operator does a few times a year. Defer until there is a
+  concrete consumer.
+- **Polars "(or nothing)" → nothing.** Both transforms are a handful of row-shaped dicts
+  per cycle (improvements 1 and 11).
+- **Pydantic "(nice to have)" → core dependency.** See "Why Pydantic is not optional"
+  below.
+
+### Why Pydantic is not optional
+
+The "nice to have" framing imagines validating measurement rows; the real value is
+elsewhere:
+
+- **It guards the riskiest data, not the bulk data.** The discriminated union on
+  `credentials.provider` plus the cross-field validator on `ApiConfig` means a malformed
+  config doc fails the container at boot with a precise error, instead of silently
+  no-op'ing or crashing mid-cycle (improvement 7).
+- **Growatt returns numbers as strings** (`"pac": "1234.5"`). Type coercion at the
+  boundary is exactly Pydantic's job; without it the same conversions are hand-written
+  with worse error messages.
+- **One model serves as both Mongo document and POST wire format** (improvement 10) —
+  that de-duplication only works if there is a schema object at all.
+- The cost is one well-maintained dependency, and `pydantic-settings` (used for env
+  config) would pull it in transitively anyway. It is also already built: `db/models.py`
+  and its tests exist (IMPL.md Step 2 complete).
+
+Polars is the right thing to cut, not Pydantic.
+
 ### Decisions confirmed
 1. **Growatt client** — wrap `growattServer.OpenApiV1` calls in `asyncio.to_thread`. Keep the 2s inter-device sleep; preferably as `asyncio.sleep` between threaded calls rather than `time.sleep` inside one big thread, so the event loop stays responsive.
 2. **OAuth state in MongoDB** — store EnPhase tokens (`access_token`, `refresh_token`, `expires_at`, `expires_in`, `token_type`) alongside the per-account config. `manage_keys.py` also handles the one-time bootstrap (exchanging `auth_code` → tokens), since `auth_code` expires very fast and that flow is awkward to retry by hand.
 3. **Output API** — single record per POST, as planned. For Growatt this means one POST per filtered device per cycle.
 4. **Python 3.13** — see "Python version" below.
+5. **Mongo driver — PyMongo async (`AsyncMongoClient`), not Motor.** Motor is deprecated (≈EOL 2026); `pymongo>=4.9` ships a native async client and is already a dependency. `motor` is dropped from `pyproject.toml` when `db/mongo.py` is built (Step 3).
+6. **Orchestration via podman compose.** The `mongo` compose service is stood up from Step 3 onward; the app image and its compose service are built at Step 13. (Step 13 originally bundled both — now split.)
 
 ### Multi-machine parallelism and scaling
 
 The system is designed for **multiple worker machines**, each responsible for a subset of accounts. The schema keys on `(provider, account_id)`; machine assignment is managed via a **lease with heartbeat** rather than a static `machine_id` field.
+
+> **Scope note.** The lease/heartbeat machinery goes beyond the product owner's stated requirements — it is the one place this plan spends complexity that was not asked for. It stays in the plan because it is cheap where it lives (isolated in IMPL.md Step 11 and `main.py`; the schema field is already built), but it is also the first thing to defer under timeline pressure: a single worker can run all enabled accounts and ignore the `lease` field, and the "no code changes between deployment stages" property means adding it later is contained.
 
 **Lease / heartbeat mechanism.** Each `api_configs` document carries a `lease: {worker_id, expires_at}`. At boot a worker atomically claims all unclaimed or expired leases (`findOneAndUpdate` filtering on `expires_at < now || lease == null`). Every `lease_renewal_interval` seconds (default: half the shortest account interval, minimum 30 s) the worker renews its held leases by bumping `expires_at`. If a worker dies, its leases expire (default TTL: `2 × interval_seconds` per account) and any other worker picks them up automatically — no manual DB intervention required for failover.
 
@@ -127,15 +182,15 @@ The system is designed for **multiple worker machines**, each responsible for a 
 - **Dozens of accounts:** `to_thread` + `ThreadPoolExecutor(max_workers=64)`. Comfortable.
 - **Hundreds per machine:** still doable; memory grows (~8 MB stack per thread). Add machines instead.
 - **Thousands total:** scale out horizontally — more workers, each holding its leased subset.
-- **Thousands per machine:** swap `to_thread` for native httpx in `clients/api_b.py` (see Growatt async upgrade path below). No other changes required.
+- **Thousands per machine:** swap `to_thread` for native httpx in `clients/growatt.py` (see Growatt async upgrade path below). No other changes required.
 
 **Per-key parallelism is free.** Each account has its own API token / OAuth credentials, so rate-limit buckets are fully independent. The constraint is local (threadpool), not remote.
 
-**Growatt async upgrade path.** When horizontal scaling is no longer sufficient, replace the three `growattServer` calls with native httpx equivalents *inside `clients/api_b.py` only*. The async facade interface (`list_plants`, `list_devices`, `device_energy`) stays identical; nothing outside that file changes. Estimated effort: ~4 hours. A full upstream `AsyncOpenApiV1` contribution to [indykoning/PyPi_GrowattServer](https://github.com/indykoning/PyPi_GrowattServer) is a cleaner long-term option (the V1 API is ~11 endpoints; the mechanical httpx conversion is 2–4 days) but is decoupled from the product timeline.
+**Growatt async upgrade path.** When horizontal scaling is no longer sufficient, replace the three `growattServer` calls with native httpx equivalents *inside `clients/growatt.py` only*. The async facade interface (`list_plants`, `list_devices`, `device_energy`) stays identical; nothing outside that file changes. Estimated effort: ~4 hours. A full upstream `AsyncOpenApiV1` contribution to [indykoning/PyPi_GrowattServer](https://github.com/indykoning/PyPi_GrowattServer) is a cleaner long-term option (the V1 API is ~11 endpoints; the mechanical httpx conversion is 2–4 days) but is decoupled from the product timeline.
 
 **Design implications baked into the plan:**
 
-1. `clients/api_b.py` exposes only three async methods (`list_plants`, `list_devices`, `device_energy`). The `to_thread` implementation is an internal detail — the httpx upgrade does not ripple outward.
+1. `clients/growatt.py` exposes only three async methods (`list_plants`, `list_devices`, `device_energy`). The `to_thread` implementation is an internal detail — the httpx upgrade does not ripple outward.
 2. `main.py` at boot: (a) claims available leases for this `WORKER_ID`; (b) starts a heartbeat renewal coroutine; (c) sets `loop.set_default_executor(ThreadPoolExecutor(max_workers=THREADPOOL_WORKERS))`; (d) builds the scheduler from claimed accounts only.
 3. APScheduler `max_instances=1` per `(provider, account_id)` — same account never overlaps itself; different accounts run in parallel.
 4. Stagger initial fire times across accounts (`hash(account_id) % interval_seconds` offset) to avoid thundering-herd on restart.
@@ -149,6 +204,11 @@ The system is designed for **multiple worker machines**, each responsible for a 
    - 4xx other than 429 → do not retry; mark record `status=failed`, `last_error`, `retry_count`, leave for human review (don't burn retries on a permanent 401).
 
 3. **Record status as an enum, not just `posted: bool`.** `processed_results` document: `status ∈ {pending, posting, posted, failed}`, `retry_count`, `last_error`, `last_attempt_at`. The flush job picks `status ∈ {pending, failed}` with `retry_count < N`, sets `posting` (atomic find-and-update) before sending — prevents double-post if a scheduler tick races a flush.
+
+   Two failure modes the flush job must also handle:
+
+   - **Stuck `posting` records.** If a worker crashes between claiming a record (`status=posting`) and completing the POST, that record is orphaned — the `{pending, failed}` filter never picks it up again. The flush job must additionally reclaim `posting` records whose `last_attempt_at` is older than a staleness threshold (a few minutes).
+   - **Two retry levels with separate counters.** Tenacity's up-to-3× backoff is *internal to one delivery attempt* and must not increment the `retry_count` that gates the flush job — otherwise a single bad cycle (3 tenacity attempts) immediately disqualifies the record from ever being flushed. `retry_count` counts delivery attempts (flush-level), with its own cap. Records that exhaust the cap stay `failed` for human review — log/count them so the backlog monitoring (see multi-machine section) surfaces them rather than letting them sit silently.
 
 4. **TTL on `raw_responses`.** Useful for debugging but grows unboundedly. Add a Mongo TTL index on `created_at` (default 30 days, configurable via env). Storing raw responses can also be made opt-in via an `api_configs.store_raw: bool` flag to control bytes.
 
@@ -182,7 +242,7 @@ The system is designed for **multiple worker machines**, each responsible for a 
 
 10. **Single schema = storage + wire.** Define one Pydantic model per source for the *processed* row (e.g. `EnphaseRow`, `GrowattRow`) and reuse the same model for both the Mongo document and the POST body. One source of truth, fewer drift bugs.
 
-11. **No Polars, no pandas.** The existing CSV writing was pandas-driven; that goes away. Pandas/Polars are unnecessary for this workload.
+11. **No Polars, no pandas.** The existing CSV writing was pandas-driven; that goes away. Pandas/Polars are unnecessary for this workload. **Action item:** `pyproject.toml` currently still lists `pandas>=3.0.3` — nothing in the new code uses it; remove it (it is the heaviest item in the dependency tree). `motor` is likewise still listed; its removal is already scheduled for IMPL.md Step 3 when `db/mongo.py` is built.
 
 12. **APScheduler config**: `AsyncIOScheduler`, one job per enabled `(provider, account_id)` loaded at boot from `api_configs`, `max_instances=1`, `coalesce=True` (matches existing semantics), `misfire_grace_time` set so a paused container resuming doesn't fire a backlog. Config changes require a restart — documented, not silently reloaded.
 
@@ -196,7 +256,7 @@ The system is designed for **multiple worker machines**, each responsible for a 
     - `manage_keys.py list` / `manage_keys.py delete --provider <p> --account-id <id>`
     The README's warning that `auth_code` expires quickly applies here too — the bootstrap must be a single self-contained command, not a multi-step manual procedure.
 
-16. **Don't copy `EnPhase/auth.py` and `access_token_gen.py` verbatim.** They have merge conflicts and use `http.client` synchronously. Rewrite as small async functions in `clients/api_a.py` using httpx. The logic is short and well-understood from the existing code; reimplementation is lower risk than untangling the conflict.
+16. **Don't copy `EnPhase/auth.py` and `access_token_gen.py` verbatim.** They have merge conflicts and use `http.client` synchronously. Rewrite as small async functions in `clients/enphase.py` using httpx. The logic is short and well-understood from the existing code; reimplementation is lower risk than untangling the conflict.
 
 ### Schema / model implementation decisions
 
@@ -243,10 +303,10 @@ still-unwritten code.
 
 ### Python version
 
-The existing repo's README pins `3.11.9`. `growattServer` 2.1.0 declares no `Requires-Python` and only the generic `Programming Language :: Python :: 3` classifier — so it does not constrain us. Pick the most recent Python that the whole stack (growattServer + motor + httpx + apscheduler + pydantic v2 + tenacity) has stable wheels for, to delay re-bumping when 3.11 hits end-of-life:
+The existing repo's README pins `3.11.9`. `growattServer` 2.1.0 declares no `Requires-Python` and only the generic `Programming Language :: Python :: 3` classifier — so it does not constrain us. Pick the most recent Python that the whole stack (growattServer + pymongo async + httpx + apscheduler + pydantic v2 + tenacity) has stable wheels for, to delay re-bumping when 3.11 hits end-of-life:
 
 - **Recommended: Python 3.13** (stable since Oct 2024; full wheel coverage for every dep we use; supported by `python:3.13-slim`).
-- Python 3.14 is newer but ecosystem coverage is patchier; revisit once Motor and APScheduler publish 3.14 wheels and minor compat issues settle.
+- Python 3.14 is newer but ecosystem coverage is patchier; revisit once PyMongo and APScheduler publish 3.14 wheels and minor compat issues settle.
 - Confirm in the very first build that `growattServer` actually imports under 3.13. If it does not (it makes no version claim either way), pin 3.12 and add a TODO to track when upstream confirms 3.13 support. This is the only place a Python downgrade would be necessary.
 
 Pin the version in both `Dockerfile` (base image) and a `.python-version` / `pyproject.toml` `requires-python = ">=3.13,<3.14"` so local dev and the container agree.
@@ -385,6 +445,62 @@ For automated scaling, rolling deploys, and centralised secret management.
 | 2 | app only, N hosts | same external | unique per host | none |
 | 3 | app only, N hosts | replica set / Atlas SRV | unique per host | none |
 | 4 | Swarm/k8s workload | Secret/ConfigMap | node/pod name | none |
+
+## Development infrastructure
+
+### dev_run.py — live test harness (IMPL.md Step 6)
+
+`dev_run.py` runs a single live fetch cycle against a real API without starting
+the scheduler.  It spins up a stdlib `http.server` echo server in a background
+thread (zero new dependencies), calls the production `fetch_job` from
+`scheduler/jobs.py`, and prints a summary:
+
+```
+uv run python dev_run.py enphase --account-id home
+uv run python dev_run.py growatt --account-id home  # once Growatt token is available
+```
+
+What it verifies end-to-end:
+- `providers.py` registry dispatch (no `if/elif` branching on provider)
+- Provider client fetches real API data
+- Transform pipeline parses the response
+- `raw_responses` and `processed_results` written to Mongo with correct shapes
+- POST sent to echo server with correct JSON body
+- `status=posted` on the processed record
+- Token refresh and site_cache behaviour (EnPhase)
+
+This is a throwaway script — its logic is absorbed into `main.py` at Step 12.
+The echo server pattern (stdlib `BaseHTTPRequestHandler` in a thread, random
+free port) is reused at Step 12 for the `docker compose up` smoke test.
+
+### Credential management — `manage_keys.py`
+
+Sensitive values (`client_secret`, `access_token`, `refresh_token`, `api_token`)
+are **never** required as CLI flags.  The CLI prompts with hidden input when
+these flags are omitted, preventing them from appearing in shell history.
+
+Alternatively, `--from-file creds.json` loads all credentials from a JSON file
+in a single operation — suitable for scripting and one-time setup.
+
+Supported file formats:
+
+**Growatt:**
+```json
+{"api_token": "..."}
+```
+
+**EnPhase:**
+```json
+{
+  "client_id": "...",
+  "client_secret": "...",
+  "redirect_uri": "...",
+  "api_key": "...",
+  "access_token": "...",
+  "refresh_token": "...",
+  "expires_in": 86399
+}
+```
 
 ## Implementation
 

@@ -1,0 +1,17 @@
+# Exclude unnecessary files from Docker build context
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.example
+*.csv
+*.log
+*.ipynb
+EnPhase/
+Growatt/
+tests/
+*.json
+!pyproject.toml
+!uv.lock

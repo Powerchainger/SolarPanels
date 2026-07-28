@@ -96,12 +96,22 @@ async def claim_leases(
         current_lease = raw_doc.get("lease")
         if current_lease is not None:
             expires_at = current_lease.get("expires_at")
-            if isinstance(expires_at, datetime) and expires_at > now:
-                # Active lease held by another (or same) worker — skip.
-                owner = current_lease.get("worker_id")
-                if owner != worker_id:
+            if isinstance(expires_at, datetime):
+                # MongoDB may return naive datetimes; treat as UTC.
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
+                if expires_at > now:
+                    # Active lease held by another worker — skip.
+                    owner = current_lease.get("worker_id")
+                    if owner != worker_id:
+                        continue
+                    # Our own lease — already claimed, will be renewed by heartbeat.
+                    raw_doc.pop("_id", None)
+                    try:
+                        claimed.append(ApiConfig(**raw_doc))
+                    except Exception:
+                        logger.exception("failed to parse owned api_config %s", doc_id)
                     continue
-                # Our own lease — will be renewed by heartbeat.
 
         provider = raw_doc.get("provider", "")
         account_id = raw_doc.get("account_id", "")
