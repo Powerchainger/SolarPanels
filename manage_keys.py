@@ -41,8 +41,16 @@ def _mongo():
 
 
 def _prompt_secret(label: str) -> str:
-    """Prompt for a sensitive value with hidden input."""
-    return typer.prompt(label, hide_input=True)
+    """Prompt for a sensitive value with hidden input.
+
+    Shows character count after entry; warns if empty.
+    """
+    value = typer.prompt(label, hide_input=True)
+    if not value:
+        typer.echo("\u26a0 Warning: value is empty", err=True)
+    else:
+        typer.echo(f"\u2713 {len(value)} characters entered")
+    return value
 
 
 # ---------------------------------------------------------------------------
