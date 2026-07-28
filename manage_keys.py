@@ -160,7 +160,7 @@ def growatt_set(
         help="Read values from a JSON file: {\"api_token\": \"...\"}",
         exists=True,
     ),
-    interval: int = typer.Option(300, "--interval", help="Poll interval in seconds"),
+    interval: int = typer.Option(360, "--interval", help="Poll interval in seconds"),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
 ) -> None:
     """Create or update a Growatt account with a static API token.
