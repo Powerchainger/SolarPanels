@@ -20,6 +20,7 @@ import logging
 from typing import Any
 
 from growattServer import OpenApiV1
+from growattServer.exceptions import GrowattV1ApiError
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,12 @@ async def list_plants(api_token: str) -> list[GrowattPlant]:
 
     def _call() -> list[GrowattPlant]:
         api = OpenApiV1(api_token)
-        resp = api.plant_list()
+        try:
+            resp = api.plant_list()
+        except GrowattV1ApiError as e:
+            raise RuntimeError(
+                f"plant_list failed: code={e.error_code} msg={e.error_msg}"
+            ) from e
         plants = resp.get("plants")
         if plants is None:
             raise RuntimeError(f"plant_list returned unexpected shape: {resp!r}")
@@ -63,7 +69,12 @@ async def list_devices(
 
     def _call() -> list[GrowattDevice]:
         api = OpenApiV1(api_token)
-        resp = api.device_list(plant_id)
+        try:
+            resp = api.device_list(plant_id)
+        except GrowattV1ApiError as e:
+            raise RuntimeError(
+                f"device_list failed: code={e.error_code} msg={e.error_msg}"
+            ) from e
         devices = resp.get("devices")
         if devices is None:
             raise RuntimeError(f"device_list returned unexpected shape: {resp!r}")
@@ -86,7 +97,12 @@ async def device_energy(
 
     def _call() -> GrowattEnergy:
         api = OpenApiV1(api_token)
-        resp = api.min_energy(device_sn=device_sn)
+        try:
+            resp = api.min_energy(device_sn=device_sn)
+        except GrowattV1ApiError as e:
+            raise RuntimeError(
+                f"min_energy failed: code={e.error_code} msg={e.error_msg}"
+            ) from e
         if not isinstance(resp, dict):
             raise RuntimeError(f"min_energy returned unexpected shape: {resp!r}")
         return resp

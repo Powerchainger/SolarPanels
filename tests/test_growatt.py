@@ -8,6 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from growattServer.exceptions import GrowattV1ApiError
 
 from clients.growatt import (
     device_energy,
@@ -72,6 +73,15 @@ async def test_list_plants_raises_on_bad_shape(mock_cls):
         await list_plants("fake-token")
 
 
+@patch("clients.growatt.OpenApiV1", autospec=False)
+async def test_list_plants_surfaces_api_error(mock_cls):
+    mock_cls.return_value.plant_list.side_effect = GrowattV1ApiError(
+        "Error during getting plant list", error_code=10011, error_msg="No privilege access"
+    )
+    with pytest.raises(RuntimeError, match="code=10011 msg=No privilege access"):
+        await list_plants("fake-token")
+
+
 # ---------------------------------------------------------------------------
 # list_devices
 # ---------------------------------------------------------------------------
@@ -101,6 +111,15 @@ async def test_list_devices_raises_on_bad_shape(mock_cls):
         await list_devices("fake-token", "12345")
 
 
+@patch("clients.growatt.OpenApiV1", autospec=False)
+async def test_list_devices_surfaces_api_error(mock_cls):
+    mock_cls.return_value.device_list.side_effect = GrowattV1ApiError(
+        "Error during getting device list", error_code=10012, error_msg="Rate limited"
+    )
+    with pytest.raises(RuntimeError, match="code=10012 msg=Rate limited"):
+        await list_devices("fake-token", "12345")
+
+
 # ---------------------------------------------------------------------------
 # device_energy
 # ---------------------------------------------------------------------------
@@ -118,6 +137,15 @@ async def test_device_energy_returns_raw_dict(mock_cls):
 async def test_device_energy_raises_on_bad_shape(mock_cls):
     mock_cls.return_value = _make_mock_api(min_energy_return="not-a-dict")
     with pytest.raises(RuntimeError, match="unexpected shape"):
+        await device_energy("fake-token", "SN001")
+
+
+@patch("clients.growatt.OpenApiV1", autospec=False)
+async def test_device_energy_surfaces_api_error(mock_cls):
+    mock_cls.return_value.min_energy.side_effect = GrowattV1ApiError(
+        "Error during getting min energy", error_code=10001, error_msg="System error"
+    )
+    with pytest.raises(RuntimeError, match="code=10001 msg=System error"):
         await device_energy("fake-token", "SN001")
 
 
