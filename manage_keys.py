@@ -1,9 +1,9 @@
 """CLI for managing api_configs documents in MongoDB.
 
 Commands:
-  enphase bootstrap  Seed an EnPhase account with OAuth2 client credentials.
-                     After this, the running service will handle token exchange.
-  growatt set        Create/update a Growatt account with a static API token.
+  enphase set      Seed an EnPhase account with OAuth2 client credentials.
+                   After this, the running service will handle token exchange.
+  growatt set      Create/update a Growatt account with a static API token.
   list               Show all api_configs documents.
   delete             Remove an api_configs document by (provider, account_id).
 
@@ -54,12 +54,12 @@ def _prompt_secret(label: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# enphase bootstrap
+# enphase set
 # ---------------------------------------------------------------------------
 
 
-@app.command("enphase-bootstrap")
-def enphase_bootstrap(
+@app.command("enphase-set")
+def enphase_set(
     account_id: str = typer.Option(..., "--account-id", help="Unique account identifier"),
     client_id: str | None = typer.Option(None, "--client-id", help="EnPhase OAuth client_id"),
     client_secret: str | None = typer.Option(
