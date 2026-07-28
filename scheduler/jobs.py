@@ -93,7 +93,7 @@ async def fetch_job(
         raw_responses = await spec.fetch(api_config, db, http_client)
     except Exception:
         logger.exception("fetch failed for %s", doc_id)
-        return
+        raise
 
     if not raw_responses:
         logger.debug("empty fetch result for %s", doc_id)
@@ -124,7 +124,7 @@ async def fetch_job(
         record_dicts = spec.transform(raw_responses, context)
     except Exception:
         logger.exception("transform failed for %s", doc_id)
-        return
+        raise
 
     # --- Write ProcessedRecords + POST ---------------------------------------
     for rec_dict in record_dicts:
