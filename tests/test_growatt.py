@@ -164,11 +164,13 @@ async def test_fetch_cycle_returns_all_type7_devices(mock_cls):
     mock_api.min_energy.side_effect = [SAMPLE_ENERGY_SN001, SAMPLE_ENERGY_SN003]
     mock_cls.return_value = mock_api
 
-    results = await fetch_cycle("fake-token", inter_device_sleep=0)
+    results, plant_id, devices = await fetch_cycle("fake-token", inter_device_sleep=0)
 
     assert len(results) == 2
     assert results[0] == ("SN001", SAMPLE_ENERGY_SN001)
     assert results[1] == ("SN003", SAMPLE_ENERGY_SN003)
+    assert plant_id == "12345"
+    assert len(devices) == 2
 
 
 @patch("clients.growatt.OpenApiV1", autospec=False)
@@ -189,8 +191,10 @@ async def test_fetch_cycle_sleeps_between_devices(mock_cls):
 @patch("clients.growatt.OpenApiV1", autospec=False)
 async def test_fetch_cycle_empty_plants(mock_cls):
     mock_cls.return_value = _make_mock_api(plant_list_return={"plants": []})
-    results = await fetch_cycle("fake-token")
+    results, plant_id, devices = await fetch_cycle("fake-token")
     assert results == []
+    assert plant_id == ""
+    assert devices == []
 
 
 @patch("clients.growatt.OpenApiV1", autospec=False)
@@ -207,5 +211,7 @@ async def test_fetch_cycle_no_type7_devices(mock_cls):
     )
     mock_cls.return_value = mock_api
 
-    results = await fetch_cycle("fake-token")
+    results, plant_id, devices = await fetch_cycle("fake-token")
     assert results == []
+    assert plant_id == "12345"
+    assert len(devices) == 0

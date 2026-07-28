@@ -115,24 +115,30 @@ async def fetch_cycle(
     *,
     device_type: int = 7,
     inter_device_sleep: float = 2.0,
-) -> list[tuple[str, GrowattEnergy]]:
+    cached_plant_id: str | None = None,
+    cached_devices: list[dict[str, Any]] | None = None,
+) -> tuple[list[tuple[str, GrowattEnergy]], str, list[dict[str, Any]]]:
     """Run a full fetch cycle for one account.
 
-    Returns a list of (device_sn, energy_dict) tuples for all type-filtered
-    devices.  The caller (Step 9 scheduler job) decides how `inter_device_sleep`
-    maps to configured intervals; this helper hard-codes the 2 s default from
-    the legacy code (Growatt/measurements.py:49).
+    Returns (results, plant_id, devices) where:
+      - results: list of (device_sn, energy_dict) tuples
+      - plant_id: the plant ID used (for caching)
+      - devices: the device list used (for caching)
 
-    This is a convenience wrapper — `list_plants`, `list_devices`, and
-    `device_energy` remain independently importable for fine-grained use.
+    If cached_plant_id and cached_devices are provided, skips the plant_list
+    and device_list API calls (rate-limit optimization).
     """
-    plants = await list_plants(api_token)
-    if not plants:
-        logger.warning("no Growatt plants found")
-        return []
-
-    plant_id = str(plants[0].get("plant_id", ""))
-    devices = await list_devices(api_token, plant_id, device_type=device_type)
+    if cached_plant_id and cached_devices:
+        plant_id = cached_plant_id
+        devices = cached_devices
+        logger.debug("using cached plant_id=%s, %d devices", plant_id, len(devices))
+    else:
+        plants = await list_plants(api_token)
+        if not plants:
+            logger.warning("no Growatt plants found")
+            return [], "", []
+        plant_id = str(plants[0].get("plant_id", ""))
+        devices = await list_devices(api_token, plant_id, device_type=device_type)
 
     results: list[tuple[str, GrowattEnergy]] = []
     for i, device in enumerate(devices):
@@ -147,4 +153,4 @@ async def fetch_cycle(
         energy = await device_energy(api_token, sn)
         results.append((sn, energy))
 
-    return results
+    return results, plant_id, devices

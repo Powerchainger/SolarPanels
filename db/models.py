@@ -74,6 +74,19 @@ class SiteCache(BaseModel):
     user: str  # site name, used as user_value in the processed row
 
 
+class GrowattCache(BaseModel):
+    """Cached Growatt plant_id and device list.
+
+    Avoids plant_list and device_list API calls every cycle. These rarely
+    change (you don't add plants/inverters often), so caching for 24h is
+    safe. Reduces API calls from 4 to 2 per cycle for 2 inverters.
+    """
+
+    plant_id: str
+    devices: list[dict[str, Any]]  # filtered device dicts with device_sn, type, etc.
+    cached_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 # ---------------------------------------------------------------------------
 # Credentials — one model per provider
 # ---------------------------------------------------------------------------
@@ -131,6 +144,7 @@ class ApiConfig(BaseModel):
     ]
     device_filter: dict[str, Any] | None = None  # Growatt only; typically {"type": 7}
     site_cache: SiteCache | None = None           # EnPhase only
+    growatt_cache: GrowattCache | None = None     # Growatt only
     lease: Lease | None = None
     store_raw: bool = True
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

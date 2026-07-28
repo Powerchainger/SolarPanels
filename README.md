@@ -11,6 +11,7 @@ Single asyncio service with:
 - Atomic lease-based multi-worker scaling (add workers, accounts distribute automatically)
 - Tenacity retry with flush job for failed POSTs
 - MongoDB TTL on raw responses (default 30 days)
+- Growatt plant/device caching (24h TTL) to reduce API calls and avoid rate limits
 
 ## Quick start
 
@@ -78,3 +79,11 @@ uv run python manage_keys.py delete --provider growatt --account-id my-home
 
 - See [PLAN.md](PLAN.md) for architecture decisions, schema design, and deployment stages.
 - See [IMPL.md](IMPL.md) for implementation details and status.
+
+### Growatt caching
+
+The Growatt API has a rate limit of ~1 request per endpoint per 5 minutes. To avoid
+exceeding this (especially when the same API token is used by ShinePhone or Home
+Assistant), the service caches `plant_list` and `device_list` responses in MongoDB
+for 24 hours. This reduces API calls from 4 to 2 per cycle (only the per-device
+`min_energy` calls are made each cycle).
