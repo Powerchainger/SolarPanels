@@ -12,9 +12,12 @@ Collections:
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
+from urllib.parse import urlparse
 
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import ConnectionFailure
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 
@@ -24,8 +27,16 @@ COLLECTIONS = ["api_configs", "raw_responses", "processed_results"]
 
 
 async def get_db(uri: str, db_name: str = "solar_scraper") -> AsyncDatabase:
-    """Return an AsyncDatabase handle. Connection is established lazily on first op."""
+    """Return an AsyncDatabase handle. Probes connectivity before returning."""
     client: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(uri)
+    try:
+        await client.admin.command("ping")
+    except ConnectionFailure:
+        host = urlparse(uri).hostname or uri
+        logger.error(
+            "MongoDB not reachable at %s — is the container running?", host
+        )
+        sys.exit(1)
     return client[db_name]
 
 
