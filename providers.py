@@ -78,9 +78,10 @@ async def _growatt_fetch(
     """Fetch a full cycle for one Growatt account.
 
     Uses cached plant_id and device list when available and fresh (<24h).
-    Updates the cache after a fresh fetch.
+    On cache miss, fetches and stores the cache eagerly before calling
+    fetch_cycle, so the cache is populated even if min_energy calls fail.
     """
-    from clients.growatt import fetch_cycle
+    from clients.growatt import fetch_cycle, list_plants, list_devices
 
     creds = cfg.credentials
     assert isinstance(creds, GrowattCredentials)
@@ -88,11 +89,13 @@ async def _growatt_fetch(
     # Check cache freshness.
     cached_plant_id = None
     cached_devices = None
+    cache_expired = True
     if cfg.growatt_cache:
         age = datetime.now(UTC) - cfg.growatt_cache.cached_at
         if age < timedelta(hours=GROWATT_CACHE_TTL_HOURS):
             cached_plant_id = cfg.growatt_cache.plant_id
             cached_devices = cfg.growatt_cache.devices
+            cache_expired = False
             logger.debug(
                 "growatt cache hit for %s (age=%.1fh)",
                 cfg.account_id, age.total_seconds() / 3600,
@@ -103,25 +106,31 @@ async def _growatt_fetch(
                 cfg.account_id, age.total_seconds() / 3600,
             )
 
-    raw, fetched_plant_id, fetched_devices = await fetch_cycle(
+    # On cache miss, populate cache eagerly before calling fetch_cycle.
+    if cache_expired:
+        try:
+            plants = await list_plants(creds.api_token)
+            if plants:
+                plant_id = str(plants[0].get("plant_id", ""))
+                devices = await list_devices(creds.api_token, plant_id, device_type=7)
+                new_cache = GrowattCache(plant_id=plant_id, devices=devices)
+                doc_id = f"{cfg.provider}::{cfg.account_id}"
+                await db.api_configs.update_one(
+                    {"_id": doc_id},
+                    {"$set": {"growatt_cache": new_cache.model_dump(mode="json")}},
+                )
+                cached_plant_id = plant_id
+                cached_devices = devices
+                logger.info("populated growatt cache for %s", cfg.account_id)
+        except Exception:
+            logger.warning("failed to populate growatt cache for %s, will retry next cycle", cfg.account_id)
+
+    raw, _fetched_plant_id, _fetched_devices = await fetch_cycle(
         creds.api_token,
         device_type=7,
         cached_plant_id=cached_plant_id,
         cached_devices=cached_devices,
     )
-
-    # Update cache if we just fetched fresh data (cache miss).
-    if not cached_plant_id and raw and fetched_plant_id:
-        new_cache = GrowattCache(
-            plant_id=fetched_plant_id,
-            devices=fetched_devices,
-        )
-        doc_id = f"{cfg.provider}::{cfg.account_id}"
-        await db.api_configs.update_one(
-            {"_id": doc_id},
-            {"$set": {"growatt_cache": new_cache.model_dump(mode="json")}},
-        )
-        logger.info("updated growatt cache for %s", cfg.account_id)
 
     return raw
 
