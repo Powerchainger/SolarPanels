@@ -43,22 +43,34 @@ class _EchoHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         global _request_count
         _request_count += 1
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
-
         try:
-            parsed = json.loads(body)
-            typer.echo(f"\n{'─'*60}")
-            typer.echo(f"  POST {self.path} (#{_request_count})")
-            typer.echo(f"  {json.dumps(parsed, indent=2, default=str)}")
-        except (json.JSONDecodeError, ValueError):
-            typer.echo(f"\n  POST {self.path} ({length} bytes)")
-            typer.echo(f"  {body[:500]}")
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8")
 
-        self.send_response(201)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"id":"echo-1","status":"received"}')
+            try:
+                parsed = json.loads(body)
+                typer.echo(f"\n{'─'*60}")
+                typer.echo(f"  POST {self.path} (#{_request_count})")
+                typer.echo(f"  {json.dumps(parsed, indent=2, default=str)}")
+            except (json.JSONDecodeError, ValueError):
+                typer.echo(f"\n  POST {self.path} ({length} bytes)")
+                typer.echo(f"  {body[:500]}")
+
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"id":"echo-1","status":"received"}')
+        except Exception:
+            import traceback
+            typer.echo(f"\n  POST {self.path} (#{_request_count}) FAILED:", err=True)
+            traceback.print_exc()
+            try:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"internal"}')
+            except Exception:
+                pass
 
     def do_GET(self):  # noqa: N802
         """Health check endpoint."""
