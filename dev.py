@@ -34,17 +34,22 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+_request_count = 0
+
+
 class _EchoHandler(BaseHTTPRequestHandler):
     """Accepts any method, prints the request, returns 201."""
 
     def do_POST(self):  # noqa: N802
+        global _request_count
+        _request_count += 1
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
 
         try:
             parsed = json.loads(body)
             typer.echo(f"\n{'─'*60}")
-            typer.echo(f"  POST {self.path}")
+            typer.echo(f"  POST {self.path} (#{_request_count})")
             typer.echo(f"  {json.dumps(parsed, indent=2, default=str)}")
         except (json.JSONDecodeError, ValueError):
             typer.echo(f"\n  POST {self.path} ({length} bytes)")
@@ -63,7 +68,7 @@ class _EchoHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"status":"ok"}')
 
     def log_message(self, format, *args):
-        pass  # suppress default stderr logging
+        typer.echo(f"  [server] {format % args}", err=True)
 
 
 def _start_echo_server(host: str = "127.0.0.1", port: int = 0) -> tuple[HTTPServer, int]:

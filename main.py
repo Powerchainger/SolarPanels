@@ -87,7 +87,7 @@ async def _main() -> None:
 
     # --- Probe output API ----------------------------------------------
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0)) as probe:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as probe:
             await probe.get(output_base_url)
     except httpx.ConnectError:
         logger.error(
@@ -103,6 +103,7 @@ async def _main() -> None:
         output_base_url=output_base_url,
         output_token=output_token,
         http_client=http_client,
+        worker_id=settings.worker_id,
     )
 
     add_flush_job(

@@ -57,16 +57,19 @@ async def fetch_job(
     output_base_url: str,
     output_token: str,
     http_client: TimedClient,
+    *,
+    worker_id: str = "",
 ) -> None:
     """Run a single fetch cycle for one provider/account.
 
     1. Read api_config (fresh credentials) from Mongo.
-    2. Dispatch via providers.py registry (no branching).
-    3. Call provider's fetch function.
-    4. Write RawResponse docs (if store_raw).
-    5. Call provider's transform function.
-    6. Write ProcessedRecord docs (status=pending).
-    7. POST each record; update status.
+    2. Skip if this worker no longer holds the lease.
+    3. Dispatch via providers.py registry (no branching).
+    4. Call provider's fetch function.
+    5. Write RawResponse docs (if store_raw).
+    6. Call provider's transform function.
+    7. Write ProcessedRecord docs (status=pending).
+    8. POST each record; update status.
     """
     spec = get_spec(provider)
 
@@ -76,6 +79,14 @@ async def fetch_job(
     if raw_doc is None:
         logger.warning("api_config %s not found, skipping cycle", doc_id)
         return
+
+    # --- Lease check -------------------------------------------------------
+    if worker_id:
+        lease = raw_doc.get("lease")
+        if lease is None or lease.get("worker_id") != worker_id:
+            logger.info("skipping %s — not lease holder", doc_id)
+            return
+
     raw_doc.pop("_id", None)
     api_config = ApiConfig(**raw_doc)
 
@@ -324,6 +335,8 @@ def add_account_jobs(
     output_base_url: str,
     output_token: str,
     http_client: TimedClient,
+    *,
+    worker_id: str = "",
 ) -> None:
     """Add one fetch job per enabled account to the scheduler.
 
@@ -346,6 +359,7 @@ def add_account_jobs(
                 "output_base_url": output_base_url,
                 "output_token": output_token,
                 "http_client": http_client,
+                "worker_id": worker_id,
             },
             max_instances=1,
             coalesce=True,
