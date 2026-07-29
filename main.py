@@ -25,6 +25,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import httpx
+
 from config import Settings
 from db.mongo import get_db, init_indexes
 from leases import claim_leases, heartbeat, release_lease
@@ -82,6 +84,17 @@ async def _main() -> None:
     # for dev_run.py, which passes its own URL directly).
     output_base_url = settings.output_api_url
     output_token = settings.output_api_token
+
+    # --- Probe output API ----------------------------------------------
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0)) as probe:
+            await probe.get(output_base_url)
+    except httpx.ConnectError:
+        logger.error(
+            "Output API not reachable at %s — is the container running?",
+            output_base_url,
+        )
+        sys.exit(1)
 
     add_account_jobs(
         scheduler,
