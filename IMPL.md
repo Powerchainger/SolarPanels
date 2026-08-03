@@ -33,7 +33,12 @@ client + 9 retry + 16 scheduler + 10 lease + 15 EnPhase client).
 **Blocked on external inputs:**
 - **Growatt API token** — not yet available. `clients/growatt.py` has full mock test coverage (11 tests). Growatt live cycle (Step 6 for Growatt) deferred until token arrives.
 
-**Recommended resume point:** Step 6 (Growatt live cycle) once API token is available, then Step 12 (wire `main.py` + smoke test).
+**Recommended resume point (pick any, order-independent):**
+
+1. **Maintenance pass** — README rewrite, `.gitignore` fix, `[project.scripts]` entry points (see "Maintenance / follow-up" section below). No API tokens needed.
+2. **Step 12 (`main.py` skeleton)** — claims leases, starts heartbeat, builds scheduler, installs signal handlers. Runnable with EnPhase alone. Does not need Growatt token.
+3. **Step 6 (Growatt live cycle)** — once Growatt API token is available.
+4. **Step 13 (Dockerfile + Docker Compose app service)** — builds on top of Step 12.
 
 **Privacy guard added:** `manage_keys.py` prompts for sensitive values (hidden input) and accepts `--from-file` for JSON-file credential loading — no sensitive data in shell history. Documented in PLAN.md.
 
@@ -52,7 +57,7 @@ service. Step 6 is the first full pipeline cycle against live infrastructure.
 
 ---
 
-### Step 1 — Scaffold + config
+### Step 1 — Scaffold + config ✅
 
 Build `config.py` (Pydantic Settings for all env vars), UTF-8 `requirements.txt`,
 `.env.example`, `.python-version` (3.13), and empty `__init__.py` stubs for each
@@ -63,7 +68,7 @@ readable validation error on any missing required var.
 
 ---
 
-### Step 2 — DB models
+### Step 2 — DB models ✅
 
 Build `db/models.py`: all Pydantic types — `ApiConfig`, `EnphaseCredentials`,
 `GrowattCredentials`, `RawResponse`, `ProcessedRecord`, `RecordStatus` enum.
@@ -72,7 +77,7 @@ Done when: unit tests cover valid and invalid model construction. No MongoDB, no
 
 ---
 
-### Step 3 — MongoDB connection + `manage_keys.py`
+### Step 3 — MongoDB connection + `manage_keys.py` ✅
 
 First bring up the `mongo` service via `podman compose up mongo` (a minimal
 `docker-compose.yml` with just the mongo service — named volume + healthcheck; the app
@@ -90,7 +95,7 @@ infrastructure test and validates the `ApiConfig` model end-to-end.
 
 ---
 
-### Step 4 — Transform pipeline (pure functions)
+### Step 4 — Transform pipeline (pure functions) ✅
 
 Build `transform/schemas.py` (`EnphaseRow`, `GrowattRow`) and `transform/pipeline.py`,
 porting parse logic from `EnPhase/cloud_measurements.py:18-50` and
@@ -101,7 +106,7 @@ redacted, committed as test fixtures) and assert correct output shapes. No netwo
 
 ---
 
-### Step 5 — Growatt client
+### Step 5 — Growatt client ✅
 
 Build `clients/growatt.py`: three async methods (`list_plants`, `list_devices`,
 `device_energy`) wrapping `growattServer.OpenApiV1` via `asyncio.to_thread`, with
@@ -112,17 +117,29 @@ that the 2 s sleep fires between device calls.
 
 ---
 
-### Step 6 — First full Growatt cycle (no scheduler)
+### Step 6 — First full Growatt cycle (no scheduler) ✅ EnPhase / 🔄 Growatt
 
-Build a throwaway `dev_run.py`: load config → connect Mongo → read one Growatt
+Build a throwaway `dev_run.py`: load config → connect Mongo → read one EnPhase/Growatt
 `api_configs` doc → run one fetch cycle → write `raw_responses` + `processed_results`.
 
-Done when: both documents appear in Mongo with the correct shapes. **This is the first
-time all layers touch real infrastructure together** — model/DB mismatches surface here.
+**EnPhase part verified ✅:** `dev_run.py enphase --account-id <id>` runs the full
+production pipeline (`providers.py` → `clients/enphase.py` → `transform/pipeline.py`
+→ Mongo writes → POST to in-process echo server). Confirmed: one `raw_responses` doc,
+one `processed_results` doc with `status=posted`, token refresh + site_cache write-back
+all functioning. Real API response shape matches synthesised fixtures — no transform
+tweaks needed.
+
+**Growatt part pending 🔄:** same script supports `dev_run.py growatt --account-id <id>`
+but requires a real Growatt API token to exercise the live cycle. Mock test coverage in
+`tests/test_growatt.py` (11 tests) already exists.
+
+Done when: both documents appear in Mongo with the correct shapes for **both**
+providers. **This is the first time all layers touch real infrastructure together** —
+model/DB mismatches surface here.
 
 ---
 
-### Step 7 — Output client + base HTTP
+### Step 7 — Output client + base HTTP ✅
 
 Build `clients/base.py` (shared `httpx.AsyncClient`, structured request/response logger)
 and `clients/output.py` (POST one record, basic error classification, no retry yet).
@@ -131,7 +148,7 @@ Done when: a minimal echo server receives the POST with the correct JSON body.
 
 ---
 
-### Step 8 — Tenacity retry + status transitions
+### Step 8 — Tenacity retry + status transitions ✅
 
 Add `tenacity` retry to `clients/output.py`: transient errors (5xx, 429, timeout) retry
 up to 3× with exponential backoff; permanent errors (other 4xx) set `status=failed`
@@ -149,7 +166,7 @@ retry and `status=failed`.
 
 ---
 
-### Step 9 — APScheduler + flush job
+### Step 9 — APScheduler + flush job ✅
 
 Build `scheduler/jobs.py`: `AsyncIOScheduler` with one job per enabled
 `(provider, account_id)`, `max_instances=1`, `coalesce=True`, staggered start offsets
@@ -178,7 +195,7 @@ branching.
 
 ---
 
-### Step 10 — EnPhase client
+### Step 10 — EnPhase client ✅
 
 Build `clients/enphase.py`: async `fetch_inverter_summary`, OAuth token refresh (written
 fresh — do **not** copy the conflict-ridden `EnPhase/auth.py`), site_id lookup with
@@ -190,7 +207,7 @@ cache miss.
 
 ---
 
-### Step 11 — Lease claiming + heartbeat
+### Step 11 — Lease claiming + heartbeat ✅
 
 Add atomic lease claim to `main.py` (`findOneAndUpdate` on
 `lease.expires_at < now || lease == null`), plus a heartbeat renewal coroutine.
@@ -313,6 +330,60 @@ project/
                              # LEASE_TTL_MULTIPLIER=2
                              # LEASE_RENEWAL_INTERVAL=30
 ```
+
+---
+
+## Maintenance / follow-up items
+
+These are not part of the numbered steps but should be done before the service is
+considered shippable. They can be tackled in any order and none require API tokens.
+
+### M1 — Rewrite README.md
+
+The current README points to the legacy `EnPhase/` and `Growatt/` folder scripts and
+describes the old two-scheduler, CSV-logging architecture. It needs a full rewrite covering:
+
+- New architecture (single asyncio service, MongoDB, output API)
+- Setup: `uv sync --extra dev`, `podman compose up mongo`, seed credentials
+- Usage: `manage_keys.py` (with `--from-file` privacy guard), `dev_run.py`, `main.py`
+- Configuration env vars (copy from `.env.example`)
+- Development: how to run tests (`uv run pytest tests/`)
+- Link to PLAN.md and IMPL.md for design/background
+
+### M2 — Fix `.gitignore`
+
+The current `.gitignore` contains `*.json` which is too broad — it blocks
+`uv.lock` (the pinned lockfile that should be committed) and would also
+exclude any future JSON test fixtures. Replace with more specific exclusions:
+
+```
+# Sensitive / generated JSON — only these specific paths
+*credentials*.json
+access_gen.json
+```
+
+Keep `*.csv`, `*.ipynb`, `*.log` as-is. Add `docker-compose.override.yml` for
+local dev overrides.
+
+### M3 — `[project.scripts]` entry points in `pyproject.toml`
+
+Register the CLI tools so they can be invoked as `manage-keys ...` and
+`dev-run ...` without the `uv run python` prefix:
+
+```toml
+[project.scripts]
+manage-keys = "manage_keys:app"
+dev-run = "dev_run:app"
+solar-scraper = "main:main"  # after Step 12 builds main.py
+```
+
+This also means `uv run manage-keys --help` works without specifying the .py file.
+
+### M4 — Commit `uv.lock`
+
+Once `.gitignore` is fixed (M2), run `git add uv.lock` and commit. The lockfile
+is the source of truth for reproducible installs — Docker builds and CI both
+depend on it.
 
 ---
 

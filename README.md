@@ -61,9 +61,21 @@ podman compose up --build
 uv run pytest tests/
 
 # Echo server — prints received records to terminal
-# Make sure to set the .env `OUTPUT_API_URL` to http://127.0.0.1:[PORT] (default 8080)
+# The echo server listens on 0.0.0.0 by default (reachable from containers).
 uv run python dev.py serve
 uv run python dev.py serve --port 9999
+#
+# Set .env OUTPUT_API_URL depending on where the echo server runs:
+#   Same machine as Podman:
+#     OUTPUT_API_URL=http://host.containers.internal:8080
+#     (host.containers.internal is a Podman/Docker built-in DNS name that
+#      resolves to the host from inside any container — use this instead of
+#      the host's LAN IP, which may be blocked by the firewall's reverse-
+#      path filtering.)
+#   Different machine on the network:
+#     OUTPUT_API_URL=http://<machine-ip>:8080
+#     (The machine running the echo server must allow inbound traffic on
+#      that port — check its firewall settings.)
 
 # Live test a single cycle (requires MongoDB + real API token)
 uv run python dev.py test-growatt --account-id my-home

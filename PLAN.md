@@ -506,3 +506,17 @@ Supported file formats:
 
 See [IMPL.md](IMPL.md) for the step-by-step implementation plan, file inventory,
 functions to port, and verification checklist.
+
+### Current status (July 2026)
+
+Steps 1–11 and Step 10 (EnPhase client) are complete. Step 6 is done for EnPhase
+(live API test passed end-to-end); Growatt is pending a real API token. Steps 12–13
+(`main.py` + Dockerfile) remain.
+
+Four maintenance items are tracked in IMPL.md under **"Maintenance / follow-up items"**:
+- **M1** — Full README rewrite (legacy README points at the old folder-based scripts)
+- **M2** — Fix `.gitignore` so `uv.lock` and JSON test fixtures can be committed
+- **M3** — Add `[project.scripts]` entries so `manage-keys` and `dev-run` run as proper CLI commands
+- **M4** — Commit `uv.lock` (blocked on M2)
+
+None of the maintenance items require API tokens and can be tackled in any order.

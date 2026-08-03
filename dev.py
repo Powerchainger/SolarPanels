@@ -83,7 +83,7 @@ class _EchoHandler(BaseHTTPRequestHandler):
         typer.echo(f"  [server] {format % args}", err=True)
 
 
-def _start_echo_server(host: str = "127.0.0.1", port: int = 0) -> tuple[HTTPServer, int]:
+def _start_echo_server(host: str = "0.0.0.0", port: int = 0) -> tuple[HTTPServer, int]:
     """Start echo server on host:port (port=0 → random free port).
 
     Returns (server, actual_port). Server is already running in a daemon thread.
@@ -102,7 +102,7 @@ def _start_echo_server(host: str = "127.0.0.1", port: int = 0) -> tuple[HTTPServ
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind address"),
     port: int = typer.Option(8080, "--port", "-p", help="Port (0 = random)"),
 ) -> None:
     """Start an echo server that prints received POSTs to the terminal.
@@ -111,7 +111,7 @@ def serve(
     """
     server, actual_port = _start_echo_server(host, port)
     typer.echo(f"Echo server listening on {host}:{actual_port}")
-    typer.echo(f"Set OUTPUT_API_URL=http://127.0.0.1:{actual_port} in .env")
+    typer.echo(f"Set OUTPUT_API_URL=http://<host-ip>:{actual_port} in .env")
     typer.echo("Press Ctrl-C to stop.\n")
 
     try:
