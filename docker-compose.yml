@@ -1,12 +1,27 @@
 services:
   mongo:
     image: docker.io/library/mongo:7
+    command: ["mongod", "--auth"]
+    # --auth is forced via command because MONGO_INITDB_ROOT_USERNAME/PASSWORD
+    # only enable auth on a FRESH volume; on the existing mongo-data volume
+    # users must be created manually first (see README "Migrating an existing
+    # database") before auth is switched on, or the server locks itself out.
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      # Read by mongo-init.js (/docker-entrypoint-initdb.d) on fresh volumes
+      # to create the least-privilege app user.
+      MONGO_APP_USER: ${MONGO_APP_USER}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD}
     ports:
-      - "27017:27017"
+      # Host tooling (manage_keys.py, dev.py) needs localhost access; nothing
+      # on the LAN does. Keep the publish off the network.
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo-data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD-SHELL", "mongosh -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --quiet --eval \"db.adminCommand('ping')\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -19,7 +34,7 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_URI=mongodb://${MONGO_APP_USER}:${MONGO_APP_PASSWORD}@mongo:27017/solar_scraper?authSource=solar_scraper
       - WORKER_ID=${WORKER_ID:-worker-1}
     restart: unless-stopped
 

@@ -25,9 +25,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 
 from db.models import ApiConfig, EnphaseCredentials, GrowattCredentials
+
+load_dotenv()  # uv does not auto-load .env — without this, MONGO_URI falls
+# back to unauthenticated localhost once Mongo requires auth.
 
 app = typer.Typer(name="manage-keys", help="Manage solar-scraper api_configs.")
 

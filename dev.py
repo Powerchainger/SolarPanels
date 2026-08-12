@@ -20,6 +20,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import typer
+from dotenv import load_dotenv
+
+load_dotenv()  # dev.py reads MONGO_URI via typer envvar — uv does not load .env
 
 app = typer.Typer(help="Development tools for solar-scraper.")
 

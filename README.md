@@ -19,17 +19,47 @@ Single asyncio service with:
 # 1. Install dependencies
 uv sync --all-extras
 
-# 2. Start MongoDB
+# 2. Configure Mongo credentials
+cp .env.example .env   # then fill in MONGO_ROOT_USERNAME/PASSWORD and
+                       # MONGO_APP_USER/PASSWORD (alphanumeric only), and set
+                       # MONGO_URI to the credentialed 127.0.0.1 form
+
+# 3. Start MongoDB
 podman compose up -d mongo
 
-# 3. Seed credentials
+# 4. Seed credentials
 uv run python manage_keys.py growatt set --account-id my-home --api-token YOUR_TOKEN
 uv run python manage_keys.py list
 
-# 4. Run the service
+# 5. Run the service
 uv run python main.py
 # or
 uv run solar-scraper
+```
+
+### MongoDB access control
+
+Mongo requires authentication and binds to `127.0.0.1` only (host tooling
+uses the credentialed `MONGO_URI` from `.env`; nothing on the LAN can reach
+it). Two users: a root/admin user (`MONGO_ROOT_*`, healthcheck + admin) and a
+least-privilege app user (`MONGO_APP_*`, `readWrite` on `solar_scraper` only).
+
+**Fresh install:** set the four vars in `.env`, then `podman compose up -d`.
+`mongo-init.js` (mounted into `/docker-entrypoint-initdb.d/`) creates the
+app user automatically on the first start.
+
+**Migrating an existing database** (created before auth, like the current
+one): `MONGO_INITDB_ROOT_*` and `mongo-init.js` only run on an *empty* data
+dir, so create both users manually **before** restarting with auth, or the
+server locks itself out:
+
+```bash
+# while Mongo is still running WITHOUT auth:
+podman compose up -d mongo
+mongosh mongodb://127.0.0.1:27017/admin --eval 'db.createUser({user: "root", pwd: "<MONGO_ROOT_PASSWORD>", roles: ["root"]})'
+mongosh mongodb://127.0.0.1:27017/solar_scraper --eval 'db.createUser({user: "<MONGO_APP_USER>", pwd: "<MONGO_APP_PASSWORD>", roles: [{role: "readWrite", db: "solar_scraper"}]})'
+# then restart to apply auth:
+podman compose up -d
 ```
 
 ## Configuration

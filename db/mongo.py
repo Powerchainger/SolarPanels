@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import ConnectionFailure, OperationFailure
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 
@@ -31,6 +31,12 @@ async def get_db(uri: str, db_name: str = "solar_scraper") -> AsyncDatabase:
     client: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(uri)
     try:
         await client.admin.command("ping")
+    except OperationFailure:
+        logger.error(
+            "MongoDB authentication failed — check MONGO_URI and the "
+            "credentials in .env (MONGO_APP_USER / MONGO_APP_PASSWORD)"
+        )
+        sys.exit(1)
     except ConnectionFailure:
         host = urlparse(uri).hostname or uri
         logger.error(
