@@ -266,15 +266,23 @@ async def _migrate(*, decrypt: bool, dry_run: bool) -> None:
         if new_creds != creds:
             changed += 1
             if not dry_run:
-                await col.update_one(
+                res = await col.update_one(
                     {"_id": doc["_id"]},
                     {"$set": {"credentials": new_creds}},
                 )
+                if res.matched_count == 0:
+                    typer.echo(
+                        f"  ! warning: no doc matched _id {doc['_id']!r} — "
+                        "write skipped",
+                        err=True,
+                    )
     verb = "decrypted" if decrypt else "encrypted"
-    prefix = "[dry-run] " if dry_run else ""
-    typer.echo(
-        f"{prefix}{changed}/{total} api_configs doc(s) would be {verb}"
-    )
+    if dry_run:
+        typer.echo(
+            f"[dry-run] {changed}/{total} api_configs doc(s) would be {verb}"
+        )
+    else:
+        typer.echo(f"{changed}/{total} api_configs doc(s) {verb}")
     if skipped:
         typer.echo(f"  {skipped} doc(s) skipped (no credentials dict)")
 
