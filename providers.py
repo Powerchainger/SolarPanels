@@ -174,10 +174,9 @@ def _enphase_transform(
     """Transform raw EnPhase response into EnphaseRow dicts."""
     from transform.pipeline import parse_enphase
 
-    site_name = context.get("site_name", "")
     rows = []
     for _label, raw_body in raw_responses:
-        rows.extend(parse_enphase(raw_body, site_name=site_name))
+        rows.extend(parse_enphase(raw_body))
     return [r.model_dump(mode="json") for r in rows]
 
 

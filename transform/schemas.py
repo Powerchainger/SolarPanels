@@ -23,8 +23,10 @@ class EnphaseRow(BaseModel):
 
     `inverters` is a dict keyed by inverter label ("inverter_1", …), values in
     watts.  `total_power` is the sum of all inverter powers for the cycle.
-    `user_value` is the site name (from api_configs.site_cache.user) — carried
-    through from the legacy CSV format so the downstream consumer can label rows.
+
+    Note: the legacy CSV format carried a `user_value` (the site name, a
+    customer name under GDPR). It was dropped on 2026-08-13 to minimize
+    personal-data exposure — see the GDPR notes.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -32,7 +34,6 @@ class EnphaseRow(BaseModel):
     timestamp: datetime           # UTC, from last_report_date of first inverter
     inverters: dict[str, float]   # {"inverter_1": 150.5, …}
     total_power: float            # sum of inverters values
-    user_value: str               # site name
 
 
 class GrowattRow(BaseModel):

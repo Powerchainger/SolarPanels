@@ -19,7 +19,7 @@ from transform.schemas import EnphaseRow, GrowattRow
 logger = logging.getLogger(__name__)
 
 
-def parse_enphase(raw_body: list | dict, site_name: str) -> list[EnphaseRow]:
+def parse_enphase(raw_body: list | dict) -> list[EnphaseRow]:
     """Parse EnPhase /api/v4/systems/inverters_summary_by_envoy_or_site response.
 
     The API returns a JSON array; element 0 contains a `micro_inverters` list.
@@ -76,7 +76,6 @@ def parse_enphase(raw_body: list | dict, site_name: str) -> list[EnphaseRow]:
             timestamp=timestamp,
             inverters=inverters,
             total_power=total_power,
-            user_value=site_name,
         )
     ]
 

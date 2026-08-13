@@ -96,8 +96,6 @@ async def fetch_job(
 
     now = datetime.now(UTC)
     context: dict[str, Any] = {"timestamp": now}
-    if api_config.site_cache:
-        context["site_name"] = api_config.site_cache.user
 
     # --- Fetch ---------------------------------------------------------------
     try:
@@ -116,8 +114,6 @@ async def fetch_job(
     if fresh_doc:
         fresh_doc.pop("_id", None)
         api_config = ApiConfig(**fresh_doc)
-        if api_config.site_cache:
-            context["site_name"] = api_config.site_cache.user
 
     # --- Store raw responses (optional) --------------------------------------
     if api_config.store_raw:

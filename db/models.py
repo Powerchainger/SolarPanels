@@ -24,7 +24,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+
+from crypto import decrypt_str, encrypt_str, is_encrypted
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +97,33 @@ class GrowattCache(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Encrypted secrets
+# ---------------------------------------------------------------------------
+
+
+def _decrypt_if_needed(value: Any) -> Any:
+    """Decrypt a Fernet token on load; leave plaintext values untouched.
+
+    Plaintext arrives from the CLI/tests (before a write) or from
+    pre-migration docs. A value that only *looks* encrypted but fails to
+    decrypt raises InvalidToken → per-account degradation (decision C).
+    """
+    if isinstance(value, str) and is_encrypted(value):
+        return decrypt_str(value)
+    return value
+
+
+EncryptedSecret = Annotated[
+    str,
+    BeforeValidator(_decrypt_if_needed),
+    PlainSerializer(lambda v: encrypt_str(v), return_type=str, when_used="json"),
+]
+"""A str field encrypted at rest (GDPR Art. 32): ciphertext in MongoDB,
+plaintext in memory. All existing read paths (leases.py, scheduler/jobs.py)
+and write paths (manage_keys.py, clients/enphase.py) work unchanged."""
+
+
+# ---------------------------------------------------------------------------
 # Credentials — one model per provider
 # ---------------------------------------------------------------------------
 
@@ -102,11 +138,11 @@ class EnphaseCredentials(BaseModel):
 
     provider: Literal["enphase"] = "enphase"
     client_id: str
-    client_secret: str
+    client_secret: EncryptedSecret
     redirect_uri: str
-    api_key: str
-    access_token: str = ""
-    refresh_token: str = ""
+    api_key: EncryptedSecret
+    access_token: EncryptedSecret = ""
+    refresh_token: EncryptedSecret = ""
     expires_at: datetime | None = None  # UTC; refresh when within 2 h of expiry
     expires_in: int | None = None       # seconds, as returned by the token endpoint
     token_type: str = "Bearer"
@@ -116,7 +152,7 @@ class GrowattCredentials(BaseModel):
     """Static API token obtained from the ShinePhone app."""
 
     provider: Literal["growatt"] = "growatt"
-    api_token: str
+    api_token: EncryptedSecret
 
 
 # ---------------------------------------------------------------------------

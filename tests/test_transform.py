@@ -41,17 +41,17 @@ GROWATT_DEVICE_RESPONSES: list[tuple[str, dict]] = [
 
 
 def test_parse_enphase_shape():
-    rows = parse_enphase(ENPHASE_RAW, site_name="Sunnyvilla")
+    rows = parse_enphase(ENPHASE_RAW)
     assert len(rows) == 1
     row = rows[0]
     assert isinstance(row, EnphaseRow)
-    assert row.user_value == "Sunnyvilla"
+    assert not hasattr(row, "user_value")  # site name dropped (GDPR minimize)
     assert row.inverters == {"inverter_1": 150.5, "inverter_2": 200.3}
     assert row.total_power == pytest.approx(350.8)
 
 
 def test_parse_enphase_timestamp_is_utc():
-    rows = parse_enphase(ENPHASE_RAW, site_name="Sunnyvilla")
+    rows = parse_enphase(ENPHASE_RAW)
     ts = rows[0].timestamp
     assert ts.tzinfo is not None
     assert ts.utcoffset().total_seconds() == 0  # UTC
@@ -61,17 +61,17 @@ def test_parse_enphase_timestamp_is_utc():
 
 def test_parse_enphase_empty_body_raises():
     with pytest.raises(ValueError, match="empty"):
-        parse_enphase([], site_name="x")
+        parse_enphase([])
 
 
 def test_parse_enphase_missing_inverters_raises():
     with pytest.raises(ValueError, match="micro_inverters"):
-        parse_enphase([{}], site_name="x")
+        parse_enphase([{}])
 
 
 def test_parse_enphase_dict_input_accepted():
     """Accept a single dict instead of a list (API sometimes returns that)."""
-    rows = parse_enphase(ENPHASE_RAW[0], site_name="x")
+    rows = parse_enphase(ENPHASE_RAW[0])
     assert len(rows) == 1
 
 
@@ -85,7 +85,7 @@ def test_parse_enphase_inverter_without_report_date_skipped():
             ]
         }
     ]
-    rows = parse_enphase(body, site_name="x")
+    rows = parse_enphase(body)
     assert rows[0].inverters == {"inverter_1": 100.0}
     assert rows[0].total_power == pytest.approx(100.0)
 
