@@ -36,6 +36,7 @@ services:
     environment:
       - MONGO_URI=mongodb://${MONGO_APP_USER}:${MONGO_APP_PASSWORD}@mongo:27017/solar_scraper?authSource=solar_scraper
       - WORKER_ID=${WORKER_ID:-worker-1}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     restart: unless-stopped
 
 volumes:

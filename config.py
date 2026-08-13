@@ -13,6 +13,10 @@ Required variables (the service will refuse to start if any are missing):
     WORKER_ID        Unique identifier for this worker instance, e.g. "worker-1".
                      Used for lease ownership — every running container must have
                      a distinct value.
+    ENCRYPTION_KEY    Fernet key for encrypting credentials at rest. Generate
+                     with `openssl rand -base64 32`. The service refuses to
+                     start without a valid key; a lost key makes stored
+                     credentials unrecoverable (back it up).
 
 Optional variables (defaults shown):
     OUTPUT_API_TOKEN  Bearer token for the output API. Leave empty if the API
@@ -33,7 +37,10 @@ Optional variables (defaults shown):
                              (default: 30)
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from crypto import validate_key
 
 
 class Settings(BaseSettings):
@@ -52,3 +59,11 @@ class Settings(BaseSettings):
     worker_id: str
     lease_ttl_multiplier: int = 2
     lease_renewal_interval: int = 30
+    encryption_key: str
+
+    @field_validator("encryption_key")
+    @classmethod
+    def _encryption_key_format(cls, v: str) -> str:
+        # Fail fast at boot: a malformed key must not silently degrade every
+        # account (decision C) once crypto ops start failing per-document.
+        return validate_key(v)
