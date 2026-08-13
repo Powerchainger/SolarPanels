@@ -15,3 +15,6 @@ logs
 # secrets
 .env
 **/credentials.*
+
+# mongodump backups — keep the project's data inside the project
+backups/
