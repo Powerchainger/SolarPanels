@@ -158,6 +158,11 @@ async def test_refresh_access_token_writes_to_mongo():
     call_args = db.api_configs.update_one.call_args[0]
     assert call_args[0] == {"_id": "enphase::acc-enphase"}
     assert "credentials" in call_args[1]["$set"]
+    # Write-back must encrypt at rest: tokens are Fernet, client_id is not.
+    creds = call_args[1]["$set"]["credentials"]
+    assert creds["access_token"].startswith("gAAAA")
+    assert creds["refresh_token"].startswith("gAAAA")
+    assert creds["client_id"] == "cid"
 
 
 @respx.mock

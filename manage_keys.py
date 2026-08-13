@@ -28,6 +28,7 @@ import typer
 from dotenv import load_dotenv
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 
+from crypto import SECRET_FIELDS, decrypt_str, encrypt_str, is_encrypted
 from db.models import ApiConfig, EnphaseCredentials, GrowattCredentials
 
 load_dotenv()  # uv does not auto-load .env — without this, MONGO_URI falls
@@ -197,6 +198,85 @@ def growatt_set(
     )
     asyncio.run(_upsert(cfg))
     typer.echo(f"✓ growatt/{account_id} written")
+
+
+# ---------------------------------------------------------------------------
+# migrate-encrypt
+# ---------------------------------------------------------------------------
+
+
+def _transform_credentials(creds: dict, *, decrypt: bool) -> dict:
+    """Encrypt (or decrypt) the secret fields of one credentials dict in place.
+
+    Idempotent: fields already in the target state (ciphertext on the
+    encrypt pass, plaintext on the decrypt pass) are left untouched.
+    Non-secret fields (client_id, redirect_uri, …) pass through unchanged.
+    """
+    out = dict(creds)
+    for field in SECRET_FIELDS.get(creds.get("provider", ""), []):
+        value = creds.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        if decrypt:
+            if is_encrypted(value):
+                out[field] = decrypt_str(value)
+        elif not is_encrypted(value):
+            out[field] = encrypt_str(value)
+    return out
+
+
+@app.command("migrate-encrypt")
+def migrate_encrypt(
+    decrypt: bool = typer.Option(
+        False, "--decrypt",
+        help="Reverse pass: decrypt ciphertext back to plaintext (rollback)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Report what would change without writing to MongoDB",
+    ),
+) -> None:
+    """Encrypt (or decrypt with --decrypt) credential fields in all api_configs docs.
+
+    Idempotent and surgical: only the SECRET_FIELDS values change; _id,
+    updated_at, site_cache, lease and all BSON types are untouched (no
+    model round-trip). Run with the service stopped, AFTER a mongodump
+    backup to ./backups/.
+
+    Rotation path: set the new ENCRYPTION_KEY, then run this command once
+    (encrypt pass re-encrypts with the new key), then the old key is dead.
+    """
+    asyncio.run(_migrate(decrypt=decrypt, dry_run=dry_run))
+
+
+async def _migrate(*, decrypt: bool, dry_run: bool) -> None:
+    db = _mongo()
+    col = db.api_configs
+    changed = 0
+    total = 0
+    skipped = 0
+    cursor = col.find({})
+    async for doc in cursor:
+        total += 1
+        creds = doc.get("credentials")
+        if not isinstance(creds, dict):
+            skipped += 1
+            continue
+        new_creds = _transform_credentials(creds, decrypt=decrypt)
+        if new_creds != creds:
+            changed += 1
+            if not dry_run:
+                await col.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {"credentials": new_creds}},
+                )
+    verb = "decrypted" if decrypt else "encrypted"
+    prefix = "[dry-run] " if dry_run else ""
+    typer.echo(
+        f"{prefix}{changed}/{total} api_configs doc(s) would be {verb}"
+    )
+    if skipped:
+        typer.echo(f"  {skipped} doc(s) skipped (no credentials dict)")
 
 
 # ---------------------------------------------------------------------------

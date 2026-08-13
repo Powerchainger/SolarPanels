@@ -1,5 +1,6 @@
 """Tests for db/models.py — no database or network required."""
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -215,6 +216,62 @@ def test_api_config_credential_provider_mismatch():
             interval_seconds=3600,
             credentials={"provider": "growatt", "api_token": "tok"},
         )
+
+
+# ---------------------------------------------------------------------------
+# Encrypted credentials at rest (GDPR Art. 32)
+# ---------------------------------------------------------------------------
+
+
+def test_credentials_roundtrip_via_json_dump():
+    """Plaintext in memory → ciphertext in model_dump(json) → plaintext on load."""
+    cfg = _enphase_config()
+    dump = cfg.model_dump(mode="json")
+    loaded = ApiConfig(**dump)
+    assert loaded.credentials.client_secret == "csec"
+    assert loaded.credentials.api_key == "key123"
+    assert loaded.credentials.access_token == ""
+    assert loaded.credentials.refresh_token == ""
+    assert loaded.credentials.client_id == "cid"
+
+
+def test_credentials_ciphertext_at_rest():
+    """model_dump(json) carries no plaintext secret; secrets are Fernet tokens."""
+    cfg = _enphase_config(credentials={
+        "provider": "enphase",
+        "client_id": "cid",
+        "client_secret": "csec",
+        "redirect_uri": "https://example.com/cb",
+        "api_key": "key123",
+        "access_token": "at-secret",
+        "refresh_token": "rt-secret",
+    })
+    dump = cfg.model_dump(mode="json")
+    creds = dump["credentials"]
+    raw = json.dumps(dump)
+    for secret in ("csec", "key123", "at-secret", "rt-secret"):
+        assert secret not in raw, f"plaintext secret leaked into dump: {secret}"
+    for f in ("client_secret", "api_key", "access_token", "refresh_token"):
+        assert creds[f].startswith("gAAAA"), f"{f} not encrypted at rest"
+    # Non-secrets stay plaintext.
+    assert creds["client_id"] == "cid"
+    assert creds["redirect_uri"] == "https://example.com/cb"
+
+
+def test_growatt_token_ciphertext_at_rest():
+    cfg = _growatt_config()
+    dump = cfg.model_dump(mode="json")
+    assert dump["credentials"]["api_token"].startswith("gAAAA")
+    assert dump["credentials"]["api_token"] != "tok"
+    loaded = ApiConfig(**dump)
+    assert loaded.credentials.api_token == "tok"
+
+
+def test_empty_tokens_stay_empty():
+    cfg = _enphase_config()
+    dump = cfg.model_dump(mode="json")
+    assert dump["credentials"]["access_token"] == ""
+    assert dump["credentials"]["refresh_token"] == ""
 
 
 # ---------------------------------------------------------------------------
