@@ -37,12 +37,14 @@ Optional variables (defaults shown):
                              (default: 30)
     SHUTDOWN_TIMEOUT_SECONDS  On SIGTERM/SIGINT, how long running fetch/flush
                               jobs may take to finish before they are
-                              cancelled. Keep it below the container's
-                              stop_grace_period (60 s in docker-compose.yml).
-                              (default: 50)
+                              cancelled. Shutdown then needs up to 10 s more
+                              (main.UNWIND_SECONDS + main.CLEANUP_SECONDS), so
+                              the container's stop_grace_period
+                              (docker-compose.yml) must exceed this + 10 s.
+                              Must be > 0. (default: 50)
 """
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from crypto import validate_key
@@ -64,7 +66,7 @@ class Settings(BaseSettings):
     worker_id: str
     lease_ttl_multiplier: int = 2
     lease_renewal_interval: int = 30
-    shutdown_timeout_seconds: float = 50
+    shutdown_timeout_seconds: float = Field(default=50, gt=0)
     encryption_key: str
 
     @field_validator("encryption_key")

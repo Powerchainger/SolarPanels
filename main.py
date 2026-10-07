@@ -134,13 +134,18 @@ async def _main() -> None:
 
     # --- Signal handlers ------------------------------------------------
     # The handler only flags the request; the awaited sequence below does
-    # the work, so nothing is left to un-awaited tasks.
+    # the work, so nothing is left to un-awaited tasks. A second signal skips
+    # the wait for running jobs.
     shutdown_requested = asyncio.Event()
+    force_shutdown = asyncio.Event()
 
     def _request_shutdown() -> None:
         if not shutdown_requested.is_set():
-            logger.info("shutdown signal received")
+            logger.info("shutdown signal received (send again to skip waiting for jobs)")
             shutdown_requested.set()
+        elif not force_shutdown.is_set():
+            logger.warning("second shutdown signal — cancelling running jobs now")
+            force_shutdown.set()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -179,8 +184,15 @@ async def _main() -> None:
         release_leases=release_all,
         http_client=http_client,
         timeout=settings.shutdown_timeout_seconds,
+        force=force_shutdown,
     )
     logger.info("solar-scraper stopped")
+
+
+# Budgets after the wait for running jobs. With the default timeout, the
+# whole shutdown needs SHUTDOWN_TIMEOUT_SECONDS + both of these.
+UNWIND_SECONDS = 5    # for cancelled jobs to actually stop
+CLEANUP_SECONDS = 5   # for stopping the heartbeat and releasing leases
 
 
 async def shutdown_gracefully(
@@ -192,35 +204,59 @@ async def shutdown_gracefully(
     release_leases: Callable[[], Awaitable[None]],
     http_client: Any,
     timeout: float,
+    force: asyncio.Event | None = None,
 ) -> None:
     """Stop in an order that lets running jobs finish.
 
     1. Pause the scheduler: no new runs start, running ones continue.
-    2. Wait up to `timeout` for running jobs (an EnPhase credential write
-       interrupted here can lose a rotated refresh token).
-    3. Shut the scheduler down, which cancels whatever is still running.
+    2. Wait up to `timeout` (or until `force` is set) for running jobs; an
+       EnPhase credential write interrupted here can lose a rotated refresh
+       token.
+    3. Shut the scheduler down, which cancels whatever is still running, and
+       give cancelled jobs UNWIND_SECONDS to stop: cancellation lands on a
+       later loop iteration, and their leases must not be released first.
     4. Stop the heartbeat, then release the leases, so no renewal lands
-       after a release.
+       after a release. Bounded by CLEANUP_SECONDS; leases not released in
+       time expire on their own.
     5. Close the shared HTTP client.
 
-    The container's stop grace period must exceed `timeout`, or the runtime
-    kills the process mid-wait (`stop_grace_period` in docker-compose.yml).
+    Steps 4 and 5 run even if an earlier step raises. The container's stop
+    grace period must cover the whole sequence (docker-compose.yml).
     """
-    scheduler.pause()
-    if running_jobs.job_ids():
-        logger.info("shutdown: waiting up to %ss for %s", timeout, ", ".join(running_jobs.job_ids()))
-    if not await running_jobs.wait_idle(timeout):
-        logger.warning(
-            "shutdown: cancelling job(s) still running after %ss: %s",
-            timeout, ", ".join(running_jobs.job_ids()),
-        )
-    scheduler.shutdown(wait=False)
-
-    heartbeat_stop.set()
-    await heartbeat_task
-
-    await release_leases()
-    await http_client.aclose()
+    try:
+        scheduler.pause()
+        running = running_jobs.job_ids()
+        if running:
+            logger.info("shutdown: waiting up to %ss for %s", timeout, ", ".join(running))
+        if not await running_jobs.wait_idle(timeout, abort=force):
+            logger.warning(
+                "shutdown: cancelling job(s) still running: %s",
+                ", ".join(running_jobs.job_ids()),
+            )
+        scheduler.shutdown(wait=False)
+        if not await running_jobs.wait_idle(UNWIND_SECONDS):
+            logger.warning(
+                "shutdown: job(s) still unwinding after %ss: %s",
+                UNWIND_SECONDS, ", ".join(running_jobs.job_ids()),
+            )
+    finally:
+        heartbeat_stop.set()
+        try:
+            async with asyncio.timeout(CLEANUP_SECONDS):
+                try:
+                    await heartbeat_task
+                except Exception:
+                    logger.exception("shutdown: heartbeat had failed")
+                await release_leases()
+        except TimeoutError:
+            heartbeat_task.cancel()
+            logger.warning(
+                "shutdown: heartbeat stop and lease release took over %ss; "
+                "unreleased leases expire on their own",
+                CLEANUP_SECONDS,
+            )
+        finally:
+            await http_client.aclose()
 
 
 def main() -> None:

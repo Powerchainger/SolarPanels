@@ -149,8 +149,14 @@ async def test_main_release_failure_does_not_stop_other_releases(mock_settings, 
 # ---------------------------------------------------------------------------
 
 
-async def _start_job(scheduler: AsyncIOScheduler, seconds: float, outcome: dict) -> None:
-    """Add a job that runs now, and wait until it is running."""
+async def _start_job(
+    scheduler: AsyncIOScheduler, seconds: float, outcome: dict, unwind: float = 0
+) -> None:
+    """Add a job that runs now, and wait until it is running.
+
+    `unwind` is how long the job keeps awaiting after it is cancelled, like
+    fetch_job's health write on its error path.
+    """
     started = asyncio.Event()
 
     async def job() -> None:
@@ -159,6 +165,7 @@ async def _start_job(scheduler: AsyncIOScheduler, seconds: float, outcome: dict)
             await asyncio.sleep(seconds)
             outcome["finished"] = True
         except asyncio.CancelledError:
+            await asyncio.sleep(unwind)
             outcome["cancelled"] = True
             raise
 
@@ -166,7 +173,11 @@ async def _start_job(scheduler: AsyncIOScheduler, seconds: float, outcome: dict)
     await asyncio.wait_for(started.wait(), 2)
 
 
-def _shutdown_parts(order: list[str]):
+def _shutdown_parts(order: list[str], outcome: dict | None = None):
+    """Heartbeat, release and client stand-ins that record their order.
+
+    With `outcome`, the release also records the job's outcome at that moment.
+    """
     heartbeat_stop = asyncio.Event()
 
     async def heartbeat() -> None:
@@ -175,6 +186,8 @@ def _shutdown_parts(order: list[str]):
 
     async def release() -> None:
         order.append("leases released")
+        if outcome is not None:
+            order.append(f"job at release: {sorted(outcome)}")
 
     client = MagicMock()
     client.aclose = AsyncMock(side_effect=lambda: order.append("client closed"))
@@ -211,19 +224,21 @@ async def test_shutdown_cancels_job_after_timeout_and_still_releases(caplog):
     scheduler.start()
     outcome: dict = {}
     order: list[str] = []
-    await _start_job(scheduler, 30, outcome)
+    await _start_job(scheduler, 30, outcome, unwind=0.2)
 
-    heartbeat_stop, heartbeat_task, release, client = _shutdown_parts(order)
+    heartbeat_stop, heartbeat_task, release, client = _shutdown_parts(order, outcome)
     await shutdown_gracefully(
         scheduler=scheduler, running_jobs=running, heartbeat_stop=heartbeat_stop,
         heartbeat_task=heartbeat_task, release_leases=release, http_client=client,
         timeout=0.1,
     )
-    await asyncio.sleep(0)  # let the cancellation reach the job
 
     assert outcome == {"cancelled": True}
-    assert "cancelling job(s) still running after 0.1s: fetch:growatt:acc" in caplog.text
-    assert order == ["heartbeat stopped", "leases released", "client closed"]
+    assert "cancelling job(s) still running: fetch:growatt:acc" in caplog.text
+    # The cancelled job had stopped before its lease was released.
+    assert order == [
+        "heartbeat stopped", "leases released", "job at release: ['cancelled']", "client closed",
+    ]
 
 
 @pytest.mark.asyncio
@@ -257,3 +272,136 @@ async def test_running_jobs_idle_without_jobs():
     running = RunningJobs(AsyncIOScheduler())
     assert running.job_ids() == []
     assert await running.wait_idle(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_running_jobs_missed_run_is_not_left_running():
+    """A submitted run past its grace window ends in EVENT_JOB_MISSED only."""
+    from datetime import UTC, datetime, timedelta
+
+    from apscheduler.events import EVENT_JOB_MISSED
+
+    scheduler = AsyncIOScheduler()
+    running = RunningJobs(scheduler)
+    missed = asyncio.Event()
+    scheduler.add_listener(lambda e: missed.set(), EVENT_JOB_MISSED)
+    scheduler.start()
+
+    async def job() -> None:
+        pass
+
+    scheduler.add_job(
+        job, "date", run_date=datetime.now(UTC) - timedelta(minutes=5),
+        misfire_grace_time=1, id="fetch::x",
+    )
+    await asyncio.wait_for(missed.wait(), 2)
+
+    assert running.job_ids() == []
+    assert await running.wait_idle(0.5) is True
+    scheduler.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_force_skips_the_wait():
+    scheduler = AsyncIOScheduler()
+    running = RunningJobs(scheduler)
+    scheduler.start()
+    outcome: dict = {}
+    await _start_job(scheduler, 30, outcome)
+    force = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.1, force.set)
+
+    heartbeat_stop, heartbeat_task, release, client = _shutdown_parts([])
+    await asyncio.wait_for(
+        shutdown_gracefully(
+            scheduler=scheduler, running_jobs=running, heartbeat_stop=heartbeat_stop,
+            heartbeat_task=heartbeat_task, release_leases=release, http_client=client,
+            timeout=30, force=force,
+        ),
+        3,
+    )
+    assert outcome == {"cancelled": True}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cleanup_is_bounded(monkeypatch, caplog):
+    """A hanging lease release (Mongo down) must not outlast the grace period."""
+    monkeypatch.setattr("main.CLEANUP_SECONDS", 0.1)
+    scheduler = AsyncIOScheduler()
+    running = RunningJobs(scheduler)
+    scheduler.start()
+    heartbeat_stop, heartbeat_task, _, client = _shutdown_parts([])
+
+    async def hanging_release() -> None:
+        await asyncio.sleep(30)
+
+    await asyncio.wait_for(
+        shutdown_gracefully(
+            scheduler=scheduler, running_jobs=running, heartbeat_stop=heartbeat_stop,
+            heartbeat_task=heartbeat_task, release_leases=hanging_release,
+            http_client=client, timeout=1,
+        ),
+        3,
+    )
+    assert "unreleased leases expire on their own" in caplog.text
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_even_if_heartbeat_failed():
+    order: list[str] = []
+    _, _, release, client = _shutdown_parts(order)
+
+    async def broken_heartbeat() -> None:
+        raise RuntimeError("boom")
+
+    scheduler = AsyncIOScheduler()
+    scheduler.start()
+    await shutdown_gracefully(
+        scheduler=scheduler, running_jobs=RunningJobs(scheduler),
+        heartbeat_stop=asyncio.Event(), heartbeat_task=asyncio.create_task(broken_heartbeat()),
+        release_leases=release, http_client=client, timeout=1,
+    )
+    assert order == ["leases released", "client closed"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_even_if_scheduler_raises():
+    order: list[str] = []
+    heartbeat_stop, heartbeat_task, release, client = _shutdown_parts(order)
+    scheduler = MagicMock()
+    scheduler.pause.side_effect = RuntimeError("scheduler broken")
+
+    with pytest.raises(RuntimeError, match="scheduler broken"):
+        await shutdown_gracefully(
+            scheduler=scheduler, running_jobs=MagicMock(), heartbeat_stop=heartbeat_stop,
+            heartbeat_task=heartbeat_task, release_leases=release, http_client=client,
+            timeout=1,
+        )
+    assert order == ["heartbeat stopped", "leases released", "client closed"]
+
+
+@pytest.mark.asyncio
+async def test_main_second_signal_forces_shutdown(mock_settings, mock_account):
+    with _patched_main(mock_settings, mock_account) as m:
+        await _main()
+        force = m.shutdown.call_args.kwargs["force"]
+        assert not force.is_set()
+        m.handlers[signal.SIGTERM]()
+        assert force.is_set()
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_shutdown_timeout_must_be_positive(monkeypatch, value):
+    from cryptography.fernet import Fernet
+    from pydantic import ValidationError
+
+    from config import Settings
+
+    for key, val in {
+        "MONGO_URI": "mongodb://x", "OUTPUT_API_URL": "http://x", "WORKER_ID": "w",
+        "ENCRYPTION_KEY": Fernet.generate_key().decode(), "SHUTDOWN_TIMEOUT_SECONDS": value,
+    }.items():
+        monkeypatch.setenv(key, val)
+    with pytest.raises(ValidationError, match="shutdown_timeout_seconds"):
+        Settings(_env_file=None)

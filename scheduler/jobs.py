@@ -28,8 +28,10 @@ from typing import Any
 from apscheduler.events import (
     EVENT_JOB_ERROR,
     EVENT_JOB_EXECUTED,
+    EVENT_JOB_MISSED,
     EVENT_JOB_SUBMITTED,
     JobEvent,
+    JobSubmissionEvent,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -405,8 +407,13 @@ class RunningJobs:
 
     APScheduler 3's asyncio executor cancels running jobs on any
     `scheduler.shutdown()` (its `wait` flag is ignored), so a graceful stop
-    pauses the scheduler, waits here, and only then shuts it down. Built on
-    the scheduler's public job events; a cancelled job reports EVENT_JOB_ERROR.
+    pauses the scheduler, waits here, and only then shuts it down.
+
+    Built on the scheduler's public job events. A submission carries its run
+    times, and each run time ends in exactly one EXECUTED, ERROR or MISSED
+    event. A cancelled submission reports a single ERROR; with
+    `coalesce=True` (all jobs here) a submission has one run time, so that
+    still balances.
     """
 
     def __init__(self, scheduler: AsyncIOScheduler) -> None:
@@ -414,10 +421,12 @@ class RunningJobs:
         self._idle = asyncio.Event()
         self._idle.set()
         scheduler.add_listener(self._on_submitted, EVENT_JOB_SUBMITTED)
-        scheduler.add_listener(self._on_finished, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+        scheduler.add_listener(
+            self._on_finished, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED
+        )
 
-    def _on_submitted(self, event: JobEvent) -> None:
-        self._running[event.job_id] += 1
+    def _on_submitted(self, event: JobSubmissionEvent) -> None:
+        self._running[event.job_id] += len(event.scheduled_run_times)
         self._idle.clear()
 
     def _on_finished(self, event: JobEvent) -> None:
@@ -430,13 +439,20 @@ class RunningJobs:
     def job_ids(self) -> list[str]:
         return sorted(self._running)
 
-    async def wait_idle(self, timeout: float) -> bool:
-        """Wait until no job is running. Returns False if `timeout` ran out first."""
+    async def wait_idle(self, timeout: float, *, abort: asyncio.Event | None = None) -> bool:
+        """Wait until no job is running, `timeout` runs out, or `abort` is set.
+
+        Returns whether no job is running.
+        """
+        waiters = [asyncio.ensure_future(self._idle.wait())]
+        if abort is not None:
+            waiters.append(asyncio.ensure_future(abort.wait()))
         try:
-            await asyncio.wait_for(self._idle.wait(), timeout)
-        except TimeoutError:
-            return False
-        return True
+            await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+        return self._idle.is_set()
 
 
 def add_account_jobs(
