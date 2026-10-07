@@ -162,8 +162,13 @@ async def fetch_job(
         ):
             logger.info("auth failure for %s not recorded (re-seeded meanwhile)", doc_id)
         return
-    except Exception:
-        logger.exception("fetch failed for %s", doc_id)
+    except Exception as exc:
+        # One line, no traceback: the re-raise lets APScheduler mark the run
+        # failed and log the traceback once ("Job ... raised an exception").
+        logger.error(
+            "fetch failed for %s (%d in a row): %s: %s",
+            doc_id, api_config.consecutive_failures + 1, type(exc).__name__, exc,
+        )
         await _record_health(db, doc_id, {"$inc": {"consecutive_failures": 1}})
         raise
 
@@ -205,8 +210,9 @@ async def fetch_job(
     # --- Transform -----------------------------------------------------------
     try:
         record_dicts = spec.transform(raw_responses, context)
-    except Exception:
-        logger.exception("transform failed for %s", doc_id)
+    except Exception as exc:
+        # Traceback comes from APScheduler on the re-raise, as for fetch.
+        logger.error("transform failed for %s: %s: %s", doc_id, type(exc).__name__, exc)
         raise
 
     # --- Write ProcessedRecords + POST ---------------------------------------

@@ -551,3 +551,59 @@ async def test_flush_job_reclaims_stale_posting_records():
     stale_query = db.processed_results.find.call_args_list[1][0][0]
     assert isinstance(stale_query["last_attempt_at"]["$lt"], datetime)
     assert isinstance(update_dict["last_attempt_at"], datetime)
+
+
+async def test_fetch_job_failure_logs_one_line_without_traceback(caplog):
+    db = _health_db(consecutive_failures=2)
+    with pytest.raises(RuntimeError, match="boom"):
+        await _run_fetch_job(db, AsyncMock(side_effect=RuntimeError("boom")))
+
+    ours = [r for r in caplog.records if r.name == "scheduler.jobs" and r.levelname == "ERROR"]
+    assert [r.getMessage() for r in ours] == [
+        "fetch failed for growatt::acc-1 (3 in a row): RuntimeError: boom"
+    ]
+    assert ours[0].exc_info is None  # APScheduler logs the traceback on the re-raise
+
+
+async def test_fetch_job_transform_failure_logs_one_line_without_traceback(caplog):
+    db = _health_db()
+    with pytest.raises(ValueError):
+        await _run_fetch_job(
+            db,
+            AsyncMock(return_value=[("SN001", {})]),
+            MagicMock(side_effect=ValueError("schema changed")),
+        )
+
+    ours = [r for r in caplog.records if r.name == "scheduler.jobs" and r.levelname == "ERROR"]
+    assert [r.getMessage() for r in ours] == [
+        "transform failed for growatt::acc-1: ValueError: schema changed"
+    ]
+    assert ours[0].exc_info is None
+
+
+async def test_failed_fetch_under_scheduler_logs_one_traceback(caplog):
+    """End to end with a real AsyncIOScheduler: one traceback per failed run."""
+    import asyncio
+
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    db = _health_db()
+    done = asyncio.Event()
+
+    async def job() -> None:
+        try:
+            await _run_fetch_job(db, AsyncMock(side_effect=RuntimeError("boom")))
+        finally:
+            done.set()
+
+    scheduler = AsyncIOScheduler()
+    scheduler.start()
+    scheduler.add_job(job, id="fetch::growatt::acc-1")
+    await asyncio.wait_for(done.wait(), 2)
+    await asyncio.sleep(0.05)  # let APScheduler's done-callback log
+    scheduler.shutdown(wait=False)
+
+    tracebacks = [r for r in caplog.records if r.exc_info]
+    assert len(tracebacks) == 1
+    assert tracebacks[0].name.startswith("apscheduler")
+    assert "fetch failed for growatt::acc-1 (1 in a row): RuntimeError: boom" in caplog.text
