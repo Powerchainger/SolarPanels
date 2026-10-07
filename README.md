@@ -51,10 +51,21 @@ written back to MongoDB, so nothing needs doing by hand while the service runs.
 There is no CLI command for refreshing.
 
 **When it breaks.** The refresh token can die: the service was stopped long enough
-for it to lapse, a rotated token was lost, or the customer revoked access. Then every
-cycle fails at the refresh step with HTTP 401 (including
-`dev.py test-enphase`), and the account stays dead until it is re-authorized.
-Nothing in the service detects this yet; check the logs.
+for it to lapse, a rotated token was lost, or the customer revoked access. EnPhase then
+rejects the refresh (HTTP 401), or a data call (HTTP 401). A data-call 401 first
+triggers one forced token refresh and retry, in case another process rotated the token.
+After 3 rejections with no successful fetch in between, the service marks the account
+`auth_failed`: it logs one error, stops fetching that account, and does not retry. Any
+successful fetch resets the count. `manage_keys.py list` shows the state (`AUTH FAILED`,
+`last_success=`, `failures=`), and every skipped cycle logs a warning, so a dead account
+stays visible. Re-seeding the account with new credentials clears the flag.
+`dev.py test-enphase` goes through the same job, so it also skips a flagged account, and
+prints the account's health after each run.
+
+`last_success` and `failures` track whether the provider *fetch* worked. Transform and
+delivery problems show up on the records in `processed_results`, not there. Growatt
+accounts get the failure counts but are never frozen: only EnPhase reports auth failures
+this way.
 
 **Authorizing (first time, or to recover).** `enphase-set` makes no API calls, so
 the token exchange happens outside the service:

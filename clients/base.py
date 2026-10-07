@@ -78,6 +78,14 @@ def log_response(response: Response, *, elapsed: float) -> None:
     )
 
 
+class AuthFailedError(Exception):
+    """The provider rejected the account's credentials.
+
+    Unlike a timeout or a 5xx, retrying cannot help: someone has to
+    re-authorize the account (see README, "EnPhase accounts").
+    """
+
+
 class TimedClient(httpx.AsyncClient):
     """httpx.AsyncClient subclass that emits structured request/response logs.
 

@@ -95,7 +95,10 @@ def _stored(cfg: ApiConfig) -> dict:
 def test_plan_new_account_inserts_everything():
     cfg = _enphase_cfg()
     up = _plan_upsert(None, cfg)
-    assert set(up["$set"]) == {"credentials", "interval_seconds", "enabled", "updated_at"}
+    assert set(up["$set"]) == {
+        "credentials", "interval_seconds", "enabled", "updated_at", "seeded_at",
+        "auth_failed", "consecutive_failures", "consecutive_auth_failures",
+    }
     assert {"provider", "account_id", "store_raw", "lease", "site_cache"} <= set(up["$setOnInsert"])
     assert not set(up["$set"]) & set(up["$setOnInsert"])  # Mongo rejects overlap
     assert "$unset" not in up
@@ -147,3 +150,33 @@ def test_upsert_uses_update_not_replace(monkeypatch):
     (q, update, upsert), = col.calls
     assert q == {"_id": "enphase::a"} and upsert is True
     assert "lease" not in update["$set"]
+
+
+def test_plan_reseed_clears_auth_failure_but_keeps_last_success():
+    stored = _stored(_enphase_cfg())
+    stored.update(
+        auth_failed=True, consecutive_failures=7, consecutive_auth_failures=3,
+        last_success_at="2026-08-14T00:00:00Z",
+    )
+    up = _plan_upsert(stored, _enphase_cfg())
+    assert up["$set"]["auth_failed"] is False
+    assert up["$set"]["consecutive_failures"] == 0
+    assert up["$set"]["consecutive_auth_failures"] == 0
+    assert "last_success_at" not in up["$set"]
+
+
+def test_plan_reseed_stamps_seeded_at():
+    up = _plan_upsert(_stored(_enphase_cfg()), _enphase_cfg())
+    assert up["$set"]["seeded_at"] == up["$set"]["updated_at"]
+
+
+def test_health_summary():
+    from datetime import UTC, datetime
+    from manage_keys import _health
+
+    assert _health({}) == "last_success=never"
+    ok = {"last_success_at": datetime(2026, 8, 14, 9, 30, tzinfo=UTC)}
+    assert _health(ok) == "last_success=2026-08-14 09:30 UTC"
+    dead = {**ok, "consecutive_failures": 3, "auth_failed": True}
+    out = _health(dead)
+    assert "failures=3" in out and "AUTH FAILED" in out

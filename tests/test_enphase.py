@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from clients.base import TimedClient
+from clients.base import AuthFailedError, TimedClient
 from clients.enphase import (
     BASE_URL,
     fetch_cycle,
@@ -175,8 +175,40 @@ async def test_refresh_access_token_http_error():
     db = _mock_db()
 
     async with TimedClient() as client:
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(AuthFailedError):
             await refresh_access_token(client, creds, db, "acc-enphase")
+
+    # A rejected refresh must not touch the stored credentials.
+    db.api_configs.update_one.assert_not_called()
+
+
+@respx.mock
+async def test_refresh_access_token_auth_rejection_message_has_no_body():
+    respx.post(f"{BASE_URL}/oauth/token").mock(
+        return_value=httpx.Response(401, text="secret-looking-body")
+    )
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError) as exc:
+            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase")
+    assert "secret-looking-body" not in str(exc.value)
+    assert "401" in str(exc.value)
+
+
+@respx.mock
+async def test_refresh_access_token_400_is_not_auth_failure():
+    """Only 401 is known to signal a dead token; a 400 stays an ordinary error."""
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(400))
+    async with TimedClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase")
+
+
+@respx.mock
+async def test_refresh_access_token_server_error_is_not_auth_failure():
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(503))
+    async with TimedClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase")
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +388,113 @@ async def test_fetch_cycle_uses_site_cache():
     assert len(result) == 1
     # Only one HTTP call (inverter_summary), not two.
     assert inverter_route.call_count == 1
+
+
+@respx.mock
+async def test_resolve_site_id_401_is_auth_failure():
+    respx.get(f"{BASE_URL}/api/v4/systems").mock(return_value=httpx.Response(401))
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError):
+            await resolve_site_id(client, _make_creds(), _mock_db(), "acc-enphase")
+
+
+@respx.mock
+async def test_fetch_inverter_summary_401_is_auth_failure():
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(401)
+    )
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError):
+            await fetch_inverter_summary(client, _make_creds(), 1)
+
+
+@respx.mock
+async def test_fetch_inverter_summary_403_is_not_auth_failure():
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(403)
+    )
+    async with TimedClient() as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_inverter_summary(client, _make_creds(), 1)
+
+
+def _refresh_ok():
+    return httpx.Response(200, json=SAMPLE_TOKEN_RESPONSE)
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_forces_one_refresh_and_retries():
+    """Valid-looking token rejected (e.g. rotated elsewhere) → refresh once, retry, succeed."""
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=None)
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    respx.get(f"{BASE_URL}/api/v4/systems").mock(
+        return_value=httpx.Response(200, json=SAMPLE_SYSTEMS_RESPONSE)
+    )
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)]
+    )
+
+    async with TimedClient() as client:
+        result = await fetch_cycle(db, _make_config(), client)  # token not near expiry
+
+    assert result[0][1] == SAMPLE_INVERTER_SUMMARY
+    assert token.call_count == 1
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_after_forced_refresh_is_auth_failure():
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=None)
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    respx.get(f"{BASE_URL}/api/v4/systems").mock(
+        return_value=httpx.Response(200, json=SAMPLE_SYSTEMS_RESPONSE)
+    )
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(401)
+    )
+
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError):
+            await fetch_cycle(db, _make_config(), client)
+
+    assert token.call_count == 1  # exactly one forced refresh, no loop
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_right_after_scheduled_refresh_does_not_refresh_again():
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=None)
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    respx.get(f"{BASE_URL}/api/v4/systems").mock(
+        return_value=httpx.Response(200, json=SAMPLE_SYSTEMS_RESPONSE)
+    )
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(401)
+    )
+    config = _make_config(
+        credentials=_make_creds(expires_at=datetime.now(UTC) + timedelta(hours=1))
+    )
+
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError):
+            await fetch_cycle(db, config, client)
+
+    assert token.call_count == 1  # the scheduled refresh only
+
+
+@respx.mock
+async def test_fetch_cycle_refresh_rejected_during_retry_is_auth_failure():
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=None)
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(401))
+    respx.get(f"{BASE_URL}/api/v4/systems").mock(
+        return_value=httpx.Response(200, json=SAMPLE_SYSTEMS_RESPONSE)
+    )
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(401)
+    )
+
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError):
+            await fetch_cycle(db, _make_config(), client)

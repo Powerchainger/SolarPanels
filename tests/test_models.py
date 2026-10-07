@@ -136,6 +136,10 @@ def test_enphase_api_config_defaults():
     assert cfg.store_raw is True
     assert cfg.lease is None
     assert cfg.site_cache is None
+    assert cfg.auth_failed is False
+    assert cfg.last_success_at is None
+    assert cfg.consecutive_failures == 0
+    assert cfg.seeded_at is None
 
 
 def test_growatt_api_config_defaults():

@@ -220,6 +220,15 @@ async def _run_cycle(provider: str, account_id: str, mongo_uri: str) -> None:
             typer.echo(f"  processed_results  : {await db.processed_results.count_documents({'provider': provider, 'account_id': account_id}) - before_proc} new")  # noqa: E501
             typer.echo(f"  echo POSTs received: {len(received_posts)}")
 
+            acct = await db.api_configs.find_one({"_id": f"{provider}::{account_id}"}) or {}
+            typer.echo(
+                f"  account health     : auth_failed={acct.get('auth_failed', False)}"
+                f"  auth_rejections={acct.get('consecutive_auth_failures', 0)}"
+                f"  failures={acct.get('consecutive_failures', 0)}"
+            )
+            if acct.get("auth_failed"):
+                typer.echo("  ! account is frozen: it needs re-authorization (see README)")
+
             typer.echo("\n→ Processed record statuses:")
             cursor = db.processed_results.find(
                 {"provider": provider, "account_id": account_id},

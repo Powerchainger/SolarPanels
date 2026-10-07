@@ -153,6 +153,7 @@ def _mock_db_with_config(api_config_dict: dict) -> MagicMock:
     """Create a mock db where find_one returns the given config dict."""
     db = MagicMock()
     db.api_configs.find_one = AsyncMock(return_value=api_config_dict)
+    db.api_configs.update_one = AsyncMock()  # health fields written by fetch_job
     db.raw_responses.insert_one = AsyncMock()
     db.processed_results.insert_one = AsyncMock()
     # Make insert_one return something with inserted_id
@@ -235,6 +236,155 @@ async def test_fetch_job_skips_disabled_account():
     )
 
     db.raw_responses.insert_one.assert_not_called()
+
+
+def _health_db(**overrides) -> MagicMock:
+    cfg = _make_growatt_config()
+    cfg_dict = cfg.model_dump(mode="json")
+    cfg_dict["_id"] = f"{cfg.provider}::{cfg.account_id}"
+    cfg_dict.update(overrides)
+    return _mock_db_with_config(cfg_dict)
+
+
+async def _run_fetch_job(db, fetch, transform=None):
+    from scheduler.jobs import fetch_job
+    from clients.base import TimedClient
+
+    async with TimedClient() as http_client:
+        with patch("scheduler.jobs.get_spec") as mock_get_spec:
+            spec = MagicMock()
+            spec.fetch = fetch
+            spec.transform = transform or MagicMock(return_value=[])
+            mock_get_spec.return_value = spec
+            await fetch_job(
+                db, "growatt", "acc-1",
+                output_base_url="https://output.example.com",
+                output_token="", http_client=http_client,
+            )
+
+
+async def test_fetch_job_success_records_health():
+    db = _health_db(consecutive_failures=4)
+    await _run_fetch_job(db, AsyncMock(return_value=[("SN001", {})]))
+
+    (q, update), _ = db.api_configs.update_one.call_args
+    assert q == {"_id": "growatt::acc-1"}
+    assert update["$set"]["consecutive_failures"] == 0
+    assert isinstance(update["$set"]["last_success_at"], datetime)
+
+
+async def test_fetch_job_empty_result_still_counts_as_success():
+    db = _health_db()
+    await _run_fetch_job(db, AsyncMock(return_value=[]))
+    update = db.api_configs.update_one.call_args[0][1]
+    assert "last_success_at" in update["$set"]
+
+
+async def test_fetch_job_generic_failure_counts_and_reraises():
+    db = _health_db()
+    with pytest.raises(RuntimeError, match="boom"):
+        await _run_fetch_job(db, AsyncMock(side_effect=RuntimeError("boom")))
+
+    update = db.api_configs.update_one.call_args[0][1]
+    assert update == {"$inc": {"consecutive_failures": 1}}  # no auth_failed
+
+
+async def test_fetch_job_first_auth_failure_counts_but_does_not_freeze():
+    from clients.base import AuthFailedError
+
+    db = _health_db()
+    await _run_fetch_job(db, AsyncMock(side_effect=AuthFailedError("dead")))  # must not raise
+
+    update = db.api_configs.update_one.call_args[0][1]
+    assert update["$set"] == {"consecutive_auth_failures": 1}  # not auth_failed yet
+    assert update["$inc"] == {"consecutive_failures": 1}
+    db.raw_responses.insert_one.assert_not_called()
+
+
+async def test_fetch_job_third_consecutive_auth_failure_freezes_account():
+    from clients.base import AuthFailedError
+    from scheduler.jobs import AUTH_FAILURE_THRESHOLD
+
+    db = _health_db(consecutive_auth_failures=AUTH_FAILURE_THRESHOLD - 1)
+    await _run_fetch_job(db, AsyncMock(side_effect=AuthFailedError("dead")))
+
+    update = db.api_configs.update_one.call_args[0][1]
+    assert update["$set"]["auth_failed"] is True
+    assert update["$set"]["consecutive_auth_failures"] == AUTH_FAILURE_THRESHOLD
+
+
+async def test_fetch_job_success_resets_auth_failure_streak():
+    db = _health_db(consecutive_auth_failures=2)
+    await _run_fetch_job(db, AsyncMock(return_value=[("SN001", {})]))
+    update = db.api_configs.update_one.call_args[0][1]
+    assert update["$set"]["consecutive_auth_failures"] == 0
+
+
+async def test_fetch_job_auth_failure_write_is_conditioned_on_seeded_at():
+    """A re-seed that landed mid-cycle must not be undone by a stale failure."""
+    from clients.base import AuthFailedError
+
+    seeded = datetime(2026, 10, 1, 12, 0)
+    db = _health_db(consecutive_auth_failures=2, seeded_at=seeded)
+    await _run_fetch_job(db, AsyncMock(side_effect=AuthFailedError("dead")))
+
+    filt = db.api_configs.update_one.call_args[0][0]
+    assert filt == {"_id": "growatt::acc-1", "seeded_at": seeded}
+
+
+async def test_fetch_job_auth_failure_guard_matches_never_reseeded_account():
+    """No seeded_at stored → filter on None, which Mongo matches for a missing field."""
+    from clients.base import AuthFailedError
+
+    db = _health_db()
+    await _run_fetch_job(db, AsyncMock(side_effect=AuthFailedError("dead")))
+    assert db.api_configs.update_one.call_args[0][0]["seeded_at"] is None
+
+
+async def test_fetch_job_health_write_failure_does_not_lose_the_cycle():
+    db = _health_db()
+    db.api_configs.update_one = AsyncMock(side_effect=RuntimeError("mongo blip"))
+
+    with respx.mock:
+        respx.post("https://output.example.com/records").mock(return_value=httpx.Response(200))
+        await _run_fetch_job(
+            db,
+            AsyncMock(return_value=[("SN001", {})]),
+            MagicMock(return_value=[{"device_sn": "SN001"}]),
+        )
+
+    db.raw_responses.insert_one.assert_called_once()
+    db.processed_results.insert_one.assert_called_once()
+
+
+async def test_fetch_job_health_write_failure_keeps_original_fetch_error():
+    db = _health_db()
+    db.api_configs.update_one = AsyncMock(side_effect=ConnectionError("mongo down"))
+    with pytest.raises(RuntimeError, match="boom"):
+        await _run_fetch_job(db, AsyncMock(side_effect=RuntimeError("boom")))
+
+
+async def test_fetch_job_transform_failure_after_fetch_still_counts_fetch_healthy():
+    """Documents the semantics: health tracks the provider fetch, not delivery."""
+    db = _health_db(consecutive_failures=2)
+    with pytest.raises(ValueError):
+        await _run_fetch_job(
+            db,
+            AsyncMock(return_value=[("SN001", {})]),
+            MagicMock(side_effect=ValueError("schema changed")),
+        )
+
+    update = db.api_configs.update_one.call_args[0][1]
+    assert update["$set"]["consecutive_failures"] == 0
+
+
+async def test_fetch_job_skips_auth_failed_account_without_fetching():
+    db = _health_db(auth_failed=True)
+    fetch = AsyncMock()
+    await _run_fetch_job(db, fetch)
+
+    fetch.assert_not_called()
+    db.api_configs.update_one.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

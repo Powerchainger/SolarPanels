@@ -26,7 +26,7 @@ from typing import Any
 import httpx
 from pymongo.asynchronous.database import AsyncDatabase
 
-from clients.base import TimedClient
+from clients.base import AuthFailedError, TimedClient
 from db.models import ApiConfig, EnphaseCredentials, SiteCache
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,16 @@ REFRESH_WINDOW_HOURS = 2
 
 def _doc_id(provider: str, account_id: str) -> str:
     return f"{provider}::{account_id}"
+
+
+def _raise_if_unauthorized(response: httpx.Response) -> None:
+    """Map a 401 on a data call to AuthFailedError (the token was revoked).
+
+    403 is left alone: it more often means a plan/permission problem than a
+    dead credential.
+    """
+    if response.status_code == 401:
+        raise AuthFailedError("EnPhase rejected the access token (HTTP 401)")
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +98,15 @@ async def refresh_access_token(
     }
 
     response = await client.post(url, headers=headers, data=params)
+    if response.status_code == 401:
+        # EnPhase answers a dead or revoked refresh token with 401
+        # (error=invalid_token). Other 4xx, such as a 400, stay ordinary
+        # errors: they are not known to mean a dead credential. The body is
+        # deliberately left out of the message.
+        raise AuthFailedError(
+            f"EnPhase rejected the token refresh for {account_id} "
+            f"(HTTP 401) — re-authorization needed"
+        )
     response.raise_for_status()
     data = response.json()
 
@@ -148,6 +167,7 @@ async def resolve_site_id(
     }
 
     response = await client.get(url, headers=headers)
+    _raise_if_unauthorized(response)
     response.raise_for_status()
     data = response.json()
 
@@ -196,6 +216,7 @@ async def fetch_inverter_summary(
     params = {"site_id": str(site_id)}
 
     response = await client.get(url, headers=headers, params=params)
+    _raise_if_unauthorized(response)
     response.raise_for_status()
     return response.json()
 
@@ -223,13 +244,25 @@ async def fetch_cycle(
     assert isinstance(creds, EnphaseCredentials)
 
     # 1. Token refresh.
+    refreshed = False
     if should_refresh(creds.expires_at):
         creds = await refresh_access_token(client, creds, db, api_config.account_id)
+        refreshed = True
 
-    # 2. Site ID.
-    site_cache = await resolve_site_id(client, creds, db, api_config.account_id)
+    async def attempt(c: EnphaseCredentials) -> Any:
+        # 2. Site ID, then 3. Fetch.
+        site_cache = await resolve_site_id(client, c, db, api_config.account_id)
+        return await fetch_inverter_summary(client, c, site_cache.site_id)
 
-    # 3. Fetch.
-    raw_body = await fetch_inverter_summary(client, creds, site_cache.site_id)
+    try:
+        raw_body = await attempt(creds)
+    except AuthFailedError:
+        # A 401 on a still-"valid" token usually means another process rotated
+        # it (or EnPhase revoked it). One forced refresh can recover that; if
+        # this cycle already refreshed, the token really is rejected.
+        if refreshed:
+            raise
+        creds = await refresh_access_token(client, creds, db, api_config.account_id)
+        raw_body = await attempt(creds)
 
     return [("inverter_summary", raw_body)]

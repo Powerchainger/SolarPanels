@@ -182,6 +182,18 @@ class ApiConfig(BaseModel):
     growatt_cache: GrowattCache | None = None     # Growatt only
     lease: Lease | None = None
     store_raw: bool = True
+    # Health, written by the fetch job. `auth_failed` means the provider rejected
+    # the credentials: the account is skipped until it is re-seeded.
+    # `last_success_at` / `consecutive_failures` track whether the provider
+    # *fetch* worked, not delivery: transform and POST outcomes live on
+    # `processed_results`. `seeded_at` lets the fetch job tell a re-seed from a token refresh.
+    # `consecutive_auth_failures` must reach
+    # AUTH_FAILURE_THRESHOLD (scheduler/jobs.py) before `auth_failed` is set.
+    auth_failed: bool = False
+    seeded_at: datetime | None = None  # set only by manage_keys.py (re-seed marker)
+    last_success_at: datetime | None = None
+    consecutive_failures: int = 0
+    consecutive_auth_failures: int = 0
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @model_validator(mode="after")

@@ -27,7 +27,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from pymongo.asynchronous.database import AsyncDatabase
 
-from clients.base import TimedClient
+from clients.base import AuthFailedError, TimedClient
 from clients.output import post_record
 from db.models import (
     ApiConfig,
@@ -43,6 +43,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_FLUSH_INTERVAL_SECONDS = 300
 DEFAULT_STALE_THRESHOLD_SECONDS = 300  # 5 minutes
+
+# Consecutive auth rejections before an account is frozen. One glitch (a
+# proxy, a briefly wrong response) must not stop collection for good.
+AUTH_FAILURE_THRESHOLD = 3
+
+
+async def _record_health(
+    db: AsyncDatabase, doc_id: str, update: dict[str, Any], *, extra_filter: dict | None = None
+) -> bool:
+    """Best-effort health write: never lets bookkeeping fail a cycle.
+
+    Returns False if the write raised or (with `extra_filter`) matched nothing.
+    """
+    try:
+        result = await db.api_configs.update_one(
+            {"_id": doc_id, **(extra_filter or {})}, update
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("could not record health for %s", doc_id, exc_info=True)
+        return False
+    return result.matched_count != 0
 
 
 # ---------------------------------------------------------------------------
@@ -94,15 +115,58 @@ async def fetch_job(
         logger.debug("account %s disabled, skipping", doc_id)
         return
 
+    if api_config.auth_failed:
+        logger.warning("skipping %s — needs re-authorization (see manage_keys.py list)", doc_id)
+        return
+
     now = datetime.now(UTC)
     context: dict[str, Any] = {"timestamp": now}
 
     # --- Fetch ---------------------------------------------------------------
     try:
         raw_responses = await spec.fetch(api_config, db, http_client)
+    except AuthFailedError as exc:
+        # Handled state, not an error to propagate. Freeze the account only
+        # after AUTH_FAILURE_THRESHOLD rejections in a row.
+        rejections = api_config.consecutive_auth_failures + 1
+        freeze = rejections >= AUTH_FAILURE_THRESHOLD
+        health_update: dict[str, Any] = {
+            "$set": {"consecutive_auth_failures": rejections},
+            "$inc": {"consecutive_failures": 1},
+        }
+        if freeze:
+            health_update["$set"]["auth_failed"] = True
+            logger.error(
+                "%s — account %s is now skipped until re-seeded", exc, doc_id
+            )
+        else:
+            logger.warning(
+                "%s — %s (%d/%d before it is skipped)",
+                exc, doc_id, rejections, AUTH_FAILURE_THRESHOLD,
+            )
+        # Only if the account has not been re-seeded since this cycle read it:
+        # a stale result must not undo a fresh re-seed. `seeded_at` changes
+        # only on a re-seed, not on a token refresh or lease heartbeat.
+        if not await _record_health(
+            db, doc_id, health_update, extra_filter={"seeded_at": raw_doc.get("seeded_at")}
+        ):
+            logger.info("auth failure for %s not recorded (re-seeded meanwhile)", doc_id)
+        return
     except Exception:
         logger.exception("fetch failed for %s", doc_id)
+        await _record_health(db, doc_id, {"$inc": {"consecutive_failures": 1}})
         raise
+
+    # The provider answered: this cycle counts as healthy even if it was empty.
+    await _record_health(
+        db,
+        doc_id,
+        {"$set": {
+            "last_success_at": now,
+            "consecutive_failures": 0,
+            "consecutive_auth_failures": 0,
+        }},
+    )
 
     if not raw_responses:
         logger.debug("empty fetch result for %s", doc_id)

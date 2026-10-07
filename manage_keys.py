@@ -353,7 +353,15 @@ def _plan_upsert(existing: dict | None, cfg: ApiConfig) -> dict:
     """
     doc = cfg.model_dump(mode="json")
     doc["updated_at"] = datetime.now(UTC)
-    controlled = {k: doc[k] for k in ("credentials", "interval_seconds", "enabled", "updated_at")}
+    doc["seeded_at"] = doc["updated_at"]
+    # Re-seeding means new credentials, so a previous auth failure is cleared.
+    controlled = {
+        k: doc[k]
+        for k in (
+            "credentials", "interval_seconds", "enabled", "updated_at", "seeded_at",
+            "auth_failed", "consecutive_failures", "consecutive_auth_failures",
+        )
+    }
     update: dict = {"$set": controlled}
     if existing is None:
         update["$setOnInsert"] = {k: v for k, v in doc.items() if k not in controlled}
@@ -369,17 +377,30 @@ async def _upsert(cfg: ApiConfig) -> None:
     await db.api_configs.update_one({"_id": _id}, _plan_upsert(existing, cfg), upsert=True)
 
 
+def _health(doc: dict) -> str:
+    """One-line health summary of an api_configs document."""
+    last = doc.get("last_success_at")
+    parts = [f"last_success={last.strftime('%Y-%m-%d %H:%M UTC') if last else 'never'}"]
+    if doc.get("consecutive_failures"):
+        parts.append(f"failures={doc['consecutive_failures']}")
+    if doc.get("auth_failed"):
+        parts.append("AUTH FAILED — re-authorize and re-seed")
+    return "  ".join(parts)
+
+
 async def _list() -> None:
     db = _mongo()
     col = db.api_configs
     cursor = col.find({}, {"_id": 1, "provider": 1, "account_id": 1,
-                          "enabled": 1, "interval_seconds": 1})
+                          "enabled": 1, "interval_seconds": 1, "auth_failed": 1,
+                          "last_success_at": 1, "consecutive_failures": 1})
     count = 0
     async for doc in cursor:
         typer.echo(
             f"  {doc['provider']}/{doc['account_id']}"
             f"  interval={doc['interval_seconds']}s"
             f"  enabled={doc['enabled']}"
+            f"  {_health(doc)}"
         )
         count += 1
     if count == 0:
