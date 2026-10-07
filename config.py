@@ -35,6 +35,11 @@ Optional variables (defaults shown):
     LEASE_RENEWAL_INTERVAL  Seconds between heartbeat renewals. Should be well
                              below LEASE_TTL_MULTIPLIER × shortest interval.
                              (default: 30)
+    SHUTDOWN_TIMEOUT_SECONDS  On SIGTERM/SIGINT, how long running fetch/flush
+                              jobs may take to finish before they are
+                              cancelled. Keep it below the container's
+                              stop_grace_period (60 s in docker-compose.yml).
+                              (default: 50)
 """
 
 from pydantic import field_validator
@@ -59,6 +64,7 @@ class Settings(BaseSettings):
     worker_id: str
     lease_ttl_multiplier: int = 2
     lease_renewal_interval: int = 30
+    shutdown_timeout_seconds: float = 50
     encryption_key: str
 
     @field_validator("encryption_key")

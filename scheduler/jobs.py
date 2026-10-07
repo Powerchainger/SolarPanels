@@ -17,12 +17,20 @@ MongoDB is accessed via the `db` (AsyncDatabase) parameter — no global state.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import random
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_SUBMITTED,
+    JobEvent,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from pymongo.asynchronous.database import AsyncDatabase
@@ -390,6 +398,45 @@ def build_scheduler(
         }
     )
     return scheduler
+
+
+class RunningJobs:
+    """Tracks which scheduler jobs are running, so shutdown can wait for them.
+
+    APScheduler 3's asyncio executor cancels running jobs on any
+    `scheduler.shutdown()` (its `wait` flag is ignored), so a graceful stop
+    pauses the scheduler, waits here, and only then shuts it down. Built on
+    the scheduler's public job events; a cancelled job reports EVENT_JOB_ERROR.
+    """
+
+    def __init__(self, scheduler: AsyncIOScheduler) -> None:
+        self._running: Counter[str] = Counter()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        scheduler.add_listener(self._on_submitted, EVENT_JOB_SUBMITTED)
+        scheduler.add_listener(self._on_finished, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+
+    def _on_submitted(self, event: JobEvent) -> None:
+        self._running[event.job_id] += 1
+        self._idle.clear()
+
+    def _on_finished(self, event: JobEvent) -> None:
+        self._running[event.job_id] -= 1
+        if self._running[event.job_id] <= 0:
+            del self._running[event.job_id]
+        if not self._running:
+            self._idle.set()
+
+    def job_ids(self) -> list[str]:
+        return sorted(self._running)
+
+    async def wait_idle(self, timeout: float) -> bool:
+        """Wait until no job is running. Returns False if `timeout` ran out first."""
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout)
+        except TimeoutError:
+            return False
+        return True
 
 
 def add_account_jobs(

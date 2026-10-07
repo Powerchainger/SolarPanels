@@ -133,6 +133,7 @@ Copy `.env.example` to `.env` and fill in:
 | `THREADPOOL_WORKERS` | No | `32` | Max threads for Growatt SDK calls |
 | `LEASE_TTL_MULTIPLIER` | No | `2` | Lease expiry = interval × this |
 | `LEASE_RENEWAL_INTERVAL` | No | `30` | Seconds between heartbeat renewals |
+| `SHUTDOWN_TIMEOUT_SECONDS` | No | `50` | On SIGTERM, how long running jobs may finish before being cancelled; keep below the compose `stop_grace_period` (60 s) |
 
 ## Docker
 
