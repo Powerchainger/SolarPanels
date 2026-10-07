@@ -2,7 +2,8 @@
 
 Boot sequence:
   1. Load config from environment.
-  2. Connect to MongoDB, ensure indexes.
+  2. Connect to MongoDB, ensure indexes, probe the output API (exits
+     before any lease is claimed if it is unreachable).
   3. Claim leases for this WORKER_ID.
   4. Start heartbeat renewal coroutine.
   5. Set default executor for growattServer.to_thread calls.
@@ -53,6 +54,23 @@ async def _main() -> None:
     db = await get_db(settings.mongo_uri)
     await init_indexes(db, ttl_days=settings.raw_ttl_days)
 
+    # --- Probe output API ----------------------------------------------
+    # Before claiming leases: exiting here holds nothing, so the restart
+    # policy can retry without blocking the accounts for interval × 2.
+    output_base_url = settings.output_api_url
+    output_token = settings.output_api_token
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as probe:
+            await probe.get(output_base_url)
+    except httpx.TransportError as exc:
+        # Any HTTP status means reachable; only transport failures (refused,
+        # connect/read timeout, DNS) mean it is not.
+        logger.error(
+            "Output API not reachable at %s (%s) — is the container running?",
+            output_base_url, type(exc).__name__,
+        )
+        sys.exit(1)
+
     # --- Claim leases ---------------------------------------------------
     claimed = await claim_leases(
         db,
@@ -84,22 +102,6 @@ async def _main() -> None:
     from clients.base import TimedClient
 
     http_client = TimedClient()
-
-    # Inject output URL from config — fallback to empty (echo-server mode
-    # for dev_run.py, which passes its own URL directly).
-    output_base_url = settings.output_api_url
-    output_token = settings.output_api_token
-
-    # --- Probe output API ----------------------------------------------
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as probe:
-            await probe.get(output_base_url)
-    except httpx.ConnectError:
-        logger.error(
-            "Output API not reachable at %s — is the container running?",
-            output_base_url,
-        )
-        sys.exit(1)
 
     add_account_jobs(
         scheduler,

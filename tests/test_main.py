@@ -12,6 +12,7 @@ import contextlib
 import signal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -76,7 +77,7 @@ def _patched_main(mock_settings, mock_account):
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=probe)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
         yield MagicMock(
-            handlers=handlers, scheduler=mock_scheduler, claim=claim, build=build,
+            handlers=handlers, scheduler=mock_scheduler, claim=claim, build=build, probe=probe,
             add_jobs=add_jobs, add_flush=add_flush, release=release, shutdown=shutdown,
         )
 
@@ -110,20 +111,14 @@ async def test_main_quiets_httpx_request_logging(mock_settings, mock_account):
 
 
 @pytest.mark.asyncio
-async def test_main_exits_when_no_accounts(mock_settings):
+async def test_main_exits_when_no_accounts(mock_settings, mock_account):
     """_main exits early if no accounts are claimed."""
-    with (
-        patch("main.Settings", return_value=mock_settings),
-        patch("main.get_db", new_callable=AsyncMock),
-        patch("main.init_indexes", new_callable=AsyncMock),
-        patch("main.claim_leases", new_callable=AsyncMock) as mock_claim,
-        patch("main.build_scheduler") as mock_build,
-    ):
-        mock_claim.return_value = []
+    with _patched_main(mock_settings, mock_account) as m:
+        m.claim.return_value = []
 
         await _main()
 
-        mock_build.assert_not_called()
+        m.build.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -420,3 +415,28 @@ def test_shutdown_timeout_must_be_positive(monkeypatch, value):
         monkeypatch.setenv(key, val)
     with pytest.raises(ValidationError, match="shutdown_timeout_seconds"):
         Settings(_env_file=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("refused"), httpx.ConnectTimeout("timed out"), httpx.ReadTimeout("slow")],
+)
+async def test_main_unreachable_output_api_exits_before_claiming(mock_settings, mock_account, error):
+    """Exiting must hold no leases, or a restart loop blocks the accounts."""
+    with _patched_main(mock_settings, mock_account) as m:
+        m.probe.get.side_effect = error
+        with pytest.raises(SystemExit) as exc:
+            await _main()
+
+    assert exc.value.code == 1
+    m.claim.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_main_output_api_error_status_counts_as_reachable(mock_settings, mock_account):
+    with _patched_main(mock_settings, mock_account) as m:
+        m.probe.get.return_value = httpx.Response(500)
+        await _main()
+
+    m.claim.assert_called_once()
