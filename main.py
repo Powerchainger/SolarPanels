@@ -42,6 +42,10 @@ async def _main() -> None:
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs every request at INFO. TimedClient (clients/base.py) already
+    # logs failed responses at WARNING and the rest at DEBUG, and
+    # clients.output logs each POST outcome at INFO, so that line is noise.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     logger.info("Starting solar-scraper worker %s", settings.worker_id)
 

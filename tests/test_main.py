@@ -95,6 +95,21 @@ async def test_main_claims_leases(mock_settings, mock_account):
 
 
 @pytest.mark.asyncio
+async def test_main_quiets_httpx_request_logging(mock_settings, mock_account):
+    import logging
+
+    httpx_logger = logging.getLogger("httpx")
+    before = httpx_logger.level
+    try:
+        with _patched_main(mock_settings, mock_account):
+            await _main()
+        assert not httpx_logger.isEnabledFor(logging.INFO)
+        assert httpx_logger.isEnabledFor(logging.WARNING)
+    finally:
+        httpx_logger.setLevel(before)
+
+
+@pytest.mark.asyncio
 async def test_main_exits_when_no_accounts(mock_settings):
     """_main exits early if no accounts are claimed."""
     with (
