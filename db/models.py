@@ -192,6 +192,9 @@ class ApiConfig(BaseModel):
     auth_failed: bool = False
     seeded_at: datetime | None = None  # set only by manage_keys.py (re-seed marker)
     last_success_at: datetime | None = None
+    # Every fetch attempt, failed ones included: provider rate limits count
+    # calls, so a worker start resumes the rhythm from here (first_run_at).
+    last_fetch_at: datetime | None = None
     consecutive_failures: int = 0
     consecutive_auth_failures: int = 0
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

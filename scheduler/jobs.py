@@ -141,7 +141,7 @@ async def fetch_job(
         rejections = api_config.consecutive_auth_failures + 1
         freeze = rejections >= AUTH_FAILURE_THRESHOLD
         health_update: dict[str, Any] = {
-            "$set": {"consecutive_auth_failures": rejections},
+            "$set": {"consecutive_auth_failures": rejections, "last_fetch_at": now},
             "$inc": {"consecutive_failures": 1},
         }
         if freeze:
@@ -169,7 +169,10 @@ async def fetch_job(
             "fetch failed for %s (%d in a row): %s: %s",
             doc_id, api_config.consecutive_failures + 1, type(exc).__name__, exc,
         )
-        await _record_health(db, doc_id, {"$inc": {"consecutive_failures": 1}})
+        await _record_health(
+            db, doc_id,
+            {"$set": {"last_fetch_at": now}, "$inc": {"consecutive_failures": 1}},
+        )
         raise
 
     # The provider answered: this cycle counts as healthy even if it was empty.
@@ -178,6 +181,7 @@ async def fetch_job(
         doc_id,
         {"$set": {
             "last_success_at": now,
+            "last_fetch_at": now,
             "consecutive_failures": 0,
             "consecutive_auth_failures": 0,
         }},
@@ -386,6 +390,26 @@ def stagger_seconds(account_id: str, interval: int) -> int:
     return int(hashlib.sha256(account_id.encode()).hexdigest(), 16) % interval
 
 
+def first_run_at(acct: ApiConfig, now: datetime) -> datetime:
+    """When a freshly started worker should first fetch this account.
+
+    If the last fetch attempt was less than one interval ago, resume that
+    rhythm (`last_fetch_at + interval`); otherwise `now + stagger`.
+    Providers rate-limit by call frequency (Growatt answers
+    `10012 error_frequently_access`), and without this every restart would
+    fetch again soon after the previous worker's last call. Resuming also
+    keeps the spread between accounts that the original stagger created.
+    """
+    interval = timedelta(seconds=acct.interval_seconds)
+    last = acct.last_fetch_at
+    if last is not None:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)  # pymongo hands back naive UTC
+        if last + interval > now:
+            return last + interval
+    return now + timedelta(seconds=stagger_seconds(acct.account_id, acct.interval_seconds))
+
+
 def build_scheduler(
     accounts: list[ApiConfig],
     *,
@@ -473,12 +497,15 @@ def add_account_jobs(
 ) -> None:
     """Add one fetch job per enabled account to the scheduler.
 
-    Each job is staggered by `stagger_seconds(account_id, interval)` to
-    spread load across accounts that share the same polling interval.
+    The first run is at `first_run_at`: one interval after the last fetch
+    attempt if that is still ahead, else staggered by
+    `stagger_seconds(account_id, interval)` to spread accounts that share
+    an interval.
     """
+    now = datetime.now(UTC)
     for acct in accounts:
         job_id = f"fetch::{acct.provider}::{acct.account_id}"
-        stagger = stagger_seconds(acct.account_id, acct.interval_seconds)
+        first_run = first_run_at(acct, now)
 
         scheduler.add_job(
             fetch_job,
@@ -497,12 +524,12 @@ def add_account_jobs(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
-            next_run_time=datetime.now(UTC) + timedelta(seconds=stagger),
+            next_run_time=first_run,
         )
 
         logger.info(
-            "registered job %s (interval=%ds, stagger=%ds)",
-            job_id, acct.interval_seconds, stagger,
+            "registered job %s (interval=%ds, first run in %ds)",
+            job_id, acct.interval_seconds, (first_run - now).total_seconds(),
         )
 
 
