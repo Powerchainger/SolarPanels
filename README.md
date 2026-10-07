@@ -141,6 +141,13 @@ Copy `.env.example` to `.env` and fill in:
 podman compose up --build
 ```
 
+Stop the app with `podman compose stop app` (or `down`/`restart`), not plain
+`podman stop`. podman-compose applies `stop_grace_period` only on its own
+stop commands; it does not set it on the container, so a direct
+`podman stop` or a host shutdown allows podman's default 10 s. That is
+enough when the app is idle but cuts short the wait for a running job
+(see `SHUTDOWN_TIMEOUT_SECONDS`).
+
 ## Development
 
 ```bash
