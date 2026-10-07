@@ -25,7 +25,7 @@ class EnphaseRow(BaseModel):
     watts.  `total_power` is the sum of all inverter powers for the cycle.
 
     Note: the legacy CSV format carried a `user_value` (the site name, a
-    customer name under GDPR). It was dropped on 2026-08-13 to minimize
+    customer name under GDPR). It is deliberately left out to minimize
     personal-data exposure — see the GDPR notes.
     """
 

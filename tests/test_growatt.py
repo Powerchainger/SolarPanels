@@ -215,3 +215,34 @@ async def test_fetch_cycle_no_type7_devices(mock_cls):
     assert results == []
     assert plant_id == "12345"
     assert len(devices) == 0
+
+
+# ---------------------------------------------------------------------------
+# providers._growatt_fetch cache write
+# ---------------------------------------------------------------------------
+
+
+async def test_growatt_cache_write_is_conditioned_on_seeded_at():
+    """A cache built with the old token must not land after a re-seed."""
+    from datetime import datetime
+    from unittest.mock import AsyncMock
+
+    from db.models import ApiConfig, GrowattCredentials
+    from providers import _growatt_fetch
+
+    seeded = datetime(2026, 10, 1, 12, 0)
+    cfg = ApiConfig(
+        provider="growatt", account_id="g", interval_seconds=600,
+        credentials=GrowattCredentials(api_token="tok"), seeded_at=seeded,
+    )
+    db = MagicMock()
+    db.api_configs.update_one = AsyncMock()
+    with (
+        patch("clients.growatt.list_plants", AsyncMock(return_value=[{"plant_id": 7}])),
+        patch("clients.growatt.list_devices", AsyncMock(return_value=[])),
+        patch("clients.growatt.fetch_cycle", AsyncMock(return_value=([], "7", []))),
+    ):
+        await _growatt_fetch(cfg, db, MagicMock())
+
+    filt = db.api_configs.update_one.call_args[0][0]
+    assert filt == {"_id": "growatt::g", "seeded_at": seeded}

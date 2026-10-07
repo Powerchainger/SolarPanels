@@ -337,7 +337,7 @@ async def test_resolve_site_id_cache_hit():
     creds = _make_creds()
 
     async with TimedClient() as client:
-        result = await resolve_site_id(client, creds, db, "acc-enphase")
+        result = await resolve_site_id(client, creds, db, "acc-enphase", seeded_at=None)
 
     assert result.site_id == 99999
     assert result.user == "CachedSite"
@@ -356,7 +356,7 @@ async def test_resolve_site_id_cache_miss_fetches():
     creds = _make_creds()
 
     async with TimedClient() as client:
-        result = await resolve_site_id(client, creds, db, "acc-enphase")
+        result = await resolve_site_id(client, creds, db, "acc-enphase", seeded_at=None)
 
     assert result.site_id == 12345
     assert result.user == "Sunnyville"
@@ -378,7 +378,7 @@ async def test_resolve_site_id_no_systems_raises():
 
     async with TimedClient() as client:
         with pytest.raises(RuntimeError, match="No systems"):
-            await resolve_site_id(client, creds, db, "acc-enphase")
+            await resolve_site_id(client, creds, db, "acc-enphase", seeded_at=None)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +504,7 @@ async def test_resolve_site_id_401_is_auth_failure():
     respx.get(f"{BASE_URL}/api/v4/systems").mock(return_value=httpx.Response(401))
     async with TimedClient() as client:
         with pytest.raises(AuthFailedError):
-            await resolve_site_id(client, _make_creds(), _mock_db(), "acc-enphase")
+            await resolve_site_id(client, _make_creds(), _mock_db(), "acc-enphase", seeded_at=None)
 
 
 @respx.mock
@@ -607,3 +607,112 @@ async def test_fetch_cycle_refresh_rejected_during_retry_is_auth_failure():
     async with TimedClient() as client:
         with pytest.raises(AuthFailedError):
             await fetch_cycle(db, _make_config(), client)
+
+
+def _stored_doc(config: ApiConfig) -> dict:
+    """What find_one returns for `config`, as Mongo would store it."""
+    return {"_id": "enphase::acc-enphase", **config.model_dump(mode="json")}
+
+
+@respx.mock
+async def test_resolve_site_id_cache_write_is_conditioned_on_seeded_at():
+    """A site resolved with old credentials must not land after a re-seed."""
+    respx.get(f"{BASE_URL}/api/v4/systems").mock(
+        return_value=httpx.Response(200, json=SAMPLE_SYSTEMS_RESPONSE)
+    )
+    seeded = datetime(2026, 10, 1, 12, 0)
+    db = _mock_db()
+    async with TimedClient() as client:
+        await resolve_site_id(client, _make_creds(), db, "acc-enphase", seeded_at=seeded)
+    filt = db.api_configs.update_one.call_args[0][0]
+    assert filt == {"_id": "enphase::acc-enphase", "seeded_at": seeded}
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_uses_credentials_refreshed_elsewhere():
+    """Another process refreshed (maybe rotating the refresh token): use its tokens, don't refresh."""
+    cached = SiteCache(site_id=1, user="x")
+    stored = _make_config(credentials=_make_creds(access_token="fresh-access"), site_cache=cached)
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(stored))
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    inverters = respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)]
+    )
+
+    async with TimedClient() as client:
+        result = await fetch_cycle(db, _make_config(site_cache=cached), client)
+
+    assert result[0][1] == SAMPLE_INVERTER_SUMMARY
+    assert token.call_count == 0
+    assert inverters.calls.last.request.headers["Authorization"] == "Bearer fresh-access"
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_refreshes_stored_credentials_near_expiry():
+    cached = SiteCache(site_id=1, user="x")
+    stored = _make_config(
+        credentials=_make_creds(
+            access_token="fresh-access", refresh_token="rotated-refresh",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+        site_cache=cached,
+    )
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(stored))
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    inverters = respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)]
+    )
+
+    async with TimedClient() as client:
+        await fetch_cycle(db, _make_config(site_cache=cached), client)
+
+    assert token.call_count == 1
+    assert "refresh_token=rotated-refresh" in token.calls.last.request.content.decode()
+    assert inverters.calls.last.request.headers["Authorization"] == "Bearer new-access-token"
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_unchanged_stored_credentials_forces_refresh():
+    cached = SiteCache(site_id=1, user="x")
+    seeded = datetime(2026, 10, 1, 12, 0)
+    config = _make_config(site_cache=cached, seeded_at=seeded)
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(config))
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)]
+    )
+
+    async with TimedClient() as client:
+        await fetch_cycle(db, config, client)
+
+    assert token.call_count == 1
+    assert "refresh_token=old-refresh" in token.calls.last.request.content.decode()
+    filt = db.api_configs.update_one.call_args[0][0]
+    assert filt["seeded_at"] == seeded
+
+
+@respx.mock
+async def test_fetch_cycle_data_401_after_reseed_uses_new_seeded_at():
+    """Re-seeded meanwhile: the stored credentials and their seeded_at are used together."""
+    cached = SiteCache(site_id=1, user="x")
+    reseeded = datetime(2026, 10, 7, 9, 0)
+    stored = _make_config(
+        credentials=_make_creds(access_token="reseed-access", expires_at=None),
+        site_cache=cached, seeded_at=reseeded,
+    )
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(stored))
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)]
+    )
+
+    config = _make_config(site_cache=cached, seeded_at=datetime(2026, 10, 1, 12, 0))
+    async with TimedClient() as client:
+        await fetch_cycle(db, config, client)
+
+    filt = db.api_configs.update_one.call_args[0][0]
+    assert filt["seeded_at"] == reseeded

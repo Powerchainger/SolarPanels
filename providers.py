@@ -115,8 +115,10 @@ async def _growatt_fetch(
                 devices = await list_devices(creds.api_token, plant_id)
                 new_cache = GrowattCache(plant_id=plant_id, devices=devices)
                 doc_id = f"{cfg.provider}::{cfg.account_id}"
+                # Only if not re-seeded since this cycle read cfg: a re-seed with
+                # a new token drops the cache, and this one may belong to the old token.
                 await db.api_configs.update_one(
-                    {"_id": doc_id},
+                    {"_id": doc_id, "seeded_at": cfg.seeded_at},
                     {"$set": {"growatt_cache": new_cache.model_dump(mode="json")}},
                 )
                 cached_plant_id = plant_id

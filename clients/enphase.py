@@ -203,12 +203,15 @@ async def resolve_site_id(
     creds: EnphaseCredentials,
     db: AsyncDatabase,
     account_id: str,
+    *,
+    seeded_at: datetime | None,
 ) -> SiteCache:
     """Look up the site_id and site name from /api/v4/systems.
 
     If the site_cache is already populated, returns the cached value
     without making an API call.  On cache miss, fetches and writes back
-    to Mongo.
+    to Mongo, unless the account was re-seeded since `seeded_at` was read:
+    a re-seed drops the cache, and this one may belong to the old account.
 
     Raises RuntimeError if no systems are found.
     """
@@ -242,7 +245,7 @@ async def resolve_site_id(
 
     # Write cache back to Mongo.
     await db.api_configs.update_one(
-        {"_id": _doc_id("enphase", account_id)},
+        {"_id": _doc_id("enphase", account_id), "seeded_at": seeded_at},
         {"$set": {
             "site_cache": site_cache.model_dump(mode="json"),
             "updated_at": datetime.now(UTC),
@@ -300,33 +303,51 @@ async def fetch_cycle(
 
     The provider registry passes this to the transform function.
     """
+    account_id = api_config.account_id
     creds = api_config.credentials
+    seeded_at = api_config.seeded_at
     assert isinstance(creds, EnphaseCredentials)
 
     # 1. Token refresh.
     refreshed = False
     if should_refresh(creds.expires_at):
-        creds = await refresh_access_token(
-            client, creds, db, api_config.account_id, seeded_at=api_config.seeded_at
-        )
+        creds = await refresh_access_token(client, creds, db, account_id, seeded_at=seeded_at)
         refreshed = True
 
-    async def attempt(c: EnphaseCredentials) -> Any:
+    async def attempt(c: EnphaseCredentials, s: datetime | None) -> Any:
         # 2. Site ID, then 3. Fetch.
-        site_cache = await resolve_site_id(client, c, db, api_config.account_id)
+        site_cache = await resolve_site_id(client, c, db, account_id, seeded_at=s)
         return await fetch_inverter_summary(client, c, site_cache.site_id)
 
     try:
-        raw_body = await attempt(creds)
+        raw_body = await attempt(creds, seeded_at)
     except AuthFailedError:
-        # A 401 on a still-"valid" token usually means another process rotated
-        # it (or EnPhase revoked it). One forced refresh can recover that; if
-        # this cycle already refreshed, the token really is rejected.
+        # If this cycle already refreshed, the token really is rejected.
         if refreshed:
             raise
-        creds = await refresh_access_token(
-            client, creds, db, api_config.account_id, seeded_at=api_config.seeded_at
-        )
-        raw_body = await attempt(creds)
+        # A 401 on a still-"valid" token usually means another process
+        # refreshed it, and EnPhase may have rotated the refresh token with
+        # it, so the stored credentials win over the ones this cycle read.
+        # If they are unchanged, one forced refresh can recover a revoked
+        # access token.
+        stored = await _reload_config(db, account_id)
+        if stored is not None:
+            assert isinstance(stored.credentials, EnphaseCredentials)
+            current, seeded_at = stored.credentials, stored.seeded_at
+        else:
+            current = creds
+        if current.access_token == creds.access_token or should_refresh(current.expires_at):
+            current = await refresh_access_token(client, current, db, account_id, seeded_at=seeded_at)
+        else:
+            logger.info("retrying %s with credentials refreshed by another process", account_id)
+        raw_body = await attempt(current, seeded_at)
 
     return [("inverter_summary", raw_body)]
+
+
+async def _reload_config(db: AsyncDatabase, account_id: str) -> ApiConfig | None:
+    raw_doc = await db.api_configs.find_one({"_id": _doc_id("enphase", account_id)})
+    if raw_doc is None:
+        return None
+    raw_doc.pop("_id", None)
+    return ApiConfig(**raw_doc)
