@@ -229,7 +229,6 @@ The system is designed for **multiple worker machines**, each responsible for a 
         #          access_token, refresh_token, expires_at, expires_in, token_type
         # growatt: api_token
      },
-     "device_filter": {"type": 7},  # growatt only
      "site_cache": {"site_id": ..., "user": ...},  # enphase only
      "lease": {"worker_id": "<WORKER_ID>", "expires_at": ISODate},
      "store_raw": true,

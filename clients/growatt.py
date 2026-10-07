@@ -24,6 +24,12 @@ from growattServer.exceptions import GrowattV1ApiError
 
 logger = logging.getLogger(__name__)
 
+# Growatt device type of the MIN/TLX hybrid inverters. `fetch_cycle` reads each
+# device with `min_energy`, an endpoint only these devices serve, so this is a
+# property of the fetch code, not a per-account setting. Other device types
+# (dataloggers, ...) are dropped by `list_devices`.
+GROWATT_MIN_DEVICE_TYPE = 7
+
 # Type alias for clarity in callers.
 GrowattPlant = dict[str, Any]
 GrowattDevice = dict[str, Any]
@@ -56,12 +62,12 @@ async def list_devices(
     api_token: str,
     plant_id: str,
     *,
-    device_type: int = 7,
+    device_type: int = GROWATT_MIN_DEVICE_TYPE,
 ) -> list[GrowattDevice]:
     """Return devices of `device_type` in `plant_id`.
 
-    Filters server-side devices to only `type == device_type` (default 7 =
-    MIN/TLX hybrid inverters).  Other device types (dataloggers, etc.) are
+    Filters server-side devices to only `type == device_type` (default
+    `GROWATT_MIN_DEVICE_TYPE`).  Other device types (dataloggers, etc.) are
     dropped silently.
 
     Raises RuntimeError on SDK errors.
@@ -113,7 +119,7 @@ async def device_energy(
 async def fetch_cycle(
     api_token: str,
     *,
-    device_type: int = 7,
+    device_type: int = GROWATT_MIN_DEVICE_TYPE,
     inter_device_sleep: float = 2.0,
     cached_plant_id: str | None = None,
     cached_devices: list[dict[str, Any]] | None = None,

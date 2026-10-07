@@ -136,7 +136,6 @@ def test_enphase_api_config_defaults():
     assert cfg.store_raw is True
     assert cfg.lease is None
     assert cfg.site_cache is None
-    assert cfg.device_filter is None
 
 
 def test_growatt_api_config_defaults():
@@ -158,9 +157,10 @@ def test_api_config_with_site_cache():
     assert cfg.site_cache.user == "Sunnyville"
 
 
-def test_api_config_with_device_filter():
+def test_api_config_ignores_removed_device_filter_field():
+    """Documents written before the field was removed must still load."""
     cfg = _growatt_config(device_filter={"type": 7})
-    assert cfg.device_filter == {"type": 7}
+    assert not hasattr(cfg, "device_filter")
 
 
 def test_api_config_disabled():

@@ -112,7 +112,7 @@ async def _growatt_fetch(
             plants = await list_plants(creds.api_token)
             if plants:
                 plant_id = str(plants[0].get("plant_id", ""))
-                devices = await list_devices(creds.api_token, plant_id, device_type=7)
+                devices = await list_devices(creds.api_token, plant_id)
                 new_cache = GrowattCache(plant_id=plant_id, devices=devices)
                 doc_id = f"{cfg.provider}::{cfg.account_id}"
                 await db.api_configs.update_one(
@@ -127,7 +127,6 @@ async def _growatt_fetch(
 
     raw, _fetched_plant_id, _fetched_devices = await fetch_cycle(
         creds.api_token,
-        device_type=7,
         cached_plant_id=cached_plant_id,
         cached_devices=cached_devices,
     )

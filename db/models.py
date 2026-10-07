@@ -178,7 +178,6 @@ class ApiConfig(BaseModel):
         EnphaseCredentials | GrowattCredentials,
         Field(discriminator="provider"),
     ]
-    device_filter: dict[str, Any] | None = None  # Growatt only; typically {"type": 7}
     site_cache: SiteCache | None = None           # EnPhase only
     growatt_cache: GrowattCache | None = None     # Growatt only
     lease: Lease | None = None
