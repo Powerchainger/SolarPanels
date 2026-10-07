@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 import respx
+from pymongo.errors import AutoReconnect
 
 from clients.base import AuthFailedError, TimedClient
 from clients.enphase import (
@@ -91,7 +92,7 @@ def _make_config(**overrides) -> ApiConfig:
 def _mock_db() -> MagicMock:
     db = MagicMock()
     db.api_configs.find_one = AsyncMock(return_value=None)
-    db.api_configs.update_one = AsyncMock()
+    db.api_configs.update_one = AsyncMock(return_value=MagicMock(matched_count=1))
     return db
 
 
@@ -131,7 +132,7 @@ async def test_refresh_access_token_sends_basic_auth():
     db = _mock_db()
 
     async with TimedClient() as client:
-        new_creds = await refresh_access_token(client, creds, db, "acc-enphase")
+        new_creds = await refresh_access_token(client, creds, db, "acc-enphase", seeded_at=None)
 
     assert new_creds.access_token == "new-access-token"
     assert new_creds.refresh_token == "new-refresh-token"
@@ -152,17 +153,125 @@ async def test_refresh_access_token_writes_to_mongo():
     db = _mock_db()
 
     async with TimedClient() as client:
-        await refresh_access_token(client, creds, db, "acc-enphase")
+        await refresh_access_token(client, creds, db, "acc-enphase", seeded_at=None)
 
     db.api_configs.update_one.assert_called_once()
     call_args = db.api_configs.update_one.call_args[0]
-    assert call_args[0] == {"_id": "enphase::acc-enphase"}
+    assert call_args[0] == {"_id": "enphase::acc-enphase", "seeded_at": None}
     assert "credentials" in call_args[1]["$set"]
     # Write-back must encrypt at rest: tokens are Fernet, client_id is not.
     creds = call_args[1]["$set"]["credentials"]
     assert creds["access_token"].startswith("gAAAA")
     assert creds["refresh_token"].startswith("gAAAA")
     assert creds["client_id"] == "cid"
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr("clients.enphase.PERSIST_BACKOFF_SECONDS", (0, 0, 0))
+
+
+@respx.mock
+async def test_refresh_access_token_write_is_conditioned_on_seeded_at():
+    """A refresh of old credentials must not overwrite a re-seed made meanwhile."""
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    seeded = datetime(2026, 10, 1, 12, 0)
+    db = _mock_db()
+    async with TimedClient() as client:
+        await refresh_access_token(client, _make_creds(), db, "acc-enphase", seeded_at=seeded)
+    filt = db.api_configs.update_one.call_args[0][0]
+    assert filt == {"_id": "enphase::acc-enphase", "seeded_at": seeded}
+
+
+@respx.mock
+async def test_refresh_access_token_reseeded_meanwhile_returns_tokens_without_retry(no_backoff):
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    db = _mock_db()
+    db.api_configs.update_one = AsyncMock(return_value=MagicMock(matched_count=0))
+    async with TimedClient() as client:
+        new_creds = await refresh_access_token(
+            client, _make_creds(), db, "acc-enphase", seeded_at=None
+        )
+    assert new_creds.access_token == "new-access-token"
+    db.api_configs.update_one.assert_called_once()
+
+
+@respx.mock
+async def test_refresh_access_token_retries_failed_write(no_backoff):
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    db = _mock_db()
+    db.api_configs.update_one = AsyncMock(
+        side_effect=[AutoReconnect("down"), AutoReconnect("down"), MagicMock(matched_count=1)]
+    )
+    async with TimedClient() as client:
+        new_creds = await refresh_access_token(
+            client, _make_creds(), db, "acc-enphase", seeded_at=None
+        )
+    assert new_creds.refresh_token == "new-refresh-token"
+    assert db.api_configs.update_one.call_count == 3
+    # Every attempt writes the same tokens.
+    stored = [c[0][1]["$set"]["credentials"] for c in db.api_configs.update_one.call_args_list]
+    assert stored[0] == stored[1] == stored[2]
+
+
+@respx.mock
+async def test_refresh_access_token_gives_up_after_all_attempts(no_backoff, caplog):
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    db = _mock_db()
+    db.api_configs.update_one = AsyncMock(side_effect=AutoReconnect("down"))
+    async with TimedClient() as client:
+        with pytest.raises(RuntimeError, match="could not be stored after 4 attempts") as exc:
+            await refresh_access_token(client, _make_creds(), db, "acc-enphase", seeded_at=None)
+    assert isinstance(exc.value.__cause__, AutoReconnect)
+    assert not isinstance(exc.value, AuthFailedError)  # an ordinary failure, not a freeze
+    assert db.api_configs.update_one.call_count == 4
+    for text in (str(exc.value), caplog.text):
+        assert "new-refresh-token" not in text
+        assert "new-access-token" not in text
+
+
+@respx.mock
+async def test_refresh_access_token_logs_rotation_without_tokens(caplog):
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    caplog.set_level("INFO", logger="clients.enphase")
+    async with TimedClient() as client:
+        await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase", seeded_at=None)
+    assert "refresh token in response: True, changed: True" in caplog.text
+    assert "new-refresh-token" not in caplog.text
+    assert "old-refresh" not in caplog.text
+
+
+@respx.mock
+async def test_refresh_access_token_without_rotation_keeps_old_refresh_token(caplog):
+    body = {k: v for k, v in SAMPLE_TOKEN_RESPONSE.items() if k != "refresh_token"}
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(200, json=body))
+    caplog.set_level("INFO", logger="clients.enphase")
+    async with TimedClient() as client:
+        new_creds = await refresh_access_token(
+            client, _make_creds(), _mock_db(), "acc-enphase", seeded_at=None
+        )
+    assert new_creds.refresh_token == "old-refresh"
+    assert "refresh token in response: False, changed: False" in caplog.text
+
+
+@respx.mock
+async def test_fetch_cycle_refresh_write_uses_config_seeded_at():
+    seeded = datetime(2026, 10, 1, 12, 0)
+    db = _mock_db()
+    respx.post(f"{BASE_URL}/oauth/token").mock(return_value=_refresh_ok())
+    respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)
+    )
+    config = _make_config(
+        credentials=_make_creds(expires_at=None),
+        site_cache=SiteCache(site_id=1, user="x"),
+        seeded_at=seeded,
+    )
+    db.api_configs.find_one = AsyncMock(return_value={"site_cache": {"site_id": 1, "user": "x"}})
+    async with TimedClient() as client:
+        await fetch_cycle(db, config, client)
+    filt = db.api_configs.update_one.call_args_list[0][0][0]
+    assert filt["seeded_at"] == seeded
 
 
 @respx.mock
@@ -176,7 +285,7 @@ async def test_refresh_access_token_http_error():
 
     async with TimedClient() as client:
         with pytest.raises(AuthFailedError):
-            await refresh_access_token(client, creds, db, "acc-enphase")
+            await refresh_access_token(client, creds, db, "acc-enphase", seeded_at=None)
 
     # A rejected refresh must not touch the stored credentials.
     db.api_configs.update_one.assert_not_called()
@@ -189,7 +298,7 @@ async def test_refresh_access_token_auth_rejection_message_has_no_body():
     )
     async with TimedClient() as client:
         with pytest.raises(AuthFailedError) as exc:
-            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase")
+            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase", seeded_at=None)
     assert "secret-looking-body" not in str(exc.value)
     assert "401" in str(exc.value)
 
@@ -200,7 +309,7 @@ async def test_refresh_access_token_400_is_not_auth_failure():
     respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(400))
     async with TimedClient() as client:
         with pytest.raises(httpx.HTTPStatusError):
-            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase")
+            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase", seeded_at=None)
 
 
 @respx.mock
@@ -208,7 +317,7 @@ async def test_refresh_access_token_server_error_is_not_auth_failure():
     respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(503))
     async with TimedClient() as client:
         with pytest.raises(httpx.HTTPStatusError):
-            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase")
+            await refresh_access_token(client, _make_creds(), _mock_db(), "acc-enphase", seeded_at=None)
 
 
 # ---------------------------------------------------------------------------

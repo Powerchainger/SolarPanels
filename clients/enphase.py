@@ -18,6 +18,7 @@ survives restarts without re-bootstrapping.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,7 @@ from typing import Any
 
 import httpx
 from pymongo.asynchronous.database import AsyncDatabase
+from pymongo.errors import PyMongoError
 
 from clients.base import AuthFailedError, TimedClient
 from db.models import ApiConfig, EnphaseCredentials, SiteCache
@@ -35,6 +37,12 @@ BASE_URL = "https://api.enphaseenergy.com"
 
 # Refresh the token when its expiry is within this window.
 REFRESH_WINDOW_HOURS = 2
+
+# Delays between attempts to store refreshed credentials. EnPhase may rotate
+# the refresh token on every refresh, so once a refresh has succeeded the new
+# token exists only in memory until this write lands; giving up loses it.
+# Each attempt can also wait out pymongo's own server-selection timeout.
+PERSIST_BACKOFF_SECONDS = (1, 2, 4)
 
 
 def _doc_id(provider: str, account_id: str) -> str:
@@ -74,11 +82,18 @@ async def refresh_access_token(
     creds: EnphaseCredentials,
     db: AsyncDatabase,
     account_id: str,
+    *,
+    seeded_at: datetime | None,
 ) -> EnphaseCredentials:
     """Refresh the OAuth access token and write new tokens back to Mongo.
 
     Uses the `refresh_token` grant with Basic auth (base64 of
     client_id:client_secret).
+
+    `seeded_at` is the value read with `creds`. The write only lands if it
+    is unchanged, so a refresh of the old credentials cannot overwrite a
+    re-seed that happened meanwhile; the new tokens are then still returned
+    for this cycle but not stored.
 
     Returns the updated EnphaseCredentials (caller should also re-read
     the api_config from Mongo after this call if needed).
@@ -122,15 +137,60 @@ async def refresh_access_token(
         expires_at=datetime.now(UTC) + timedelta(seconds=data.get("expires_in", 86399)),
     )
 
-    # Persist new tokens to Mongo so the service survives restarts.
-    creds_dict = new_creds.model_dump(mode="json")
-    await db.api_configs.update_one(
-        {"_id": _doc_id("enphase", account_id)},
-        {"$set": {"credentials": creds_dict, "updated_at": datetime.now(UTC)}},
+    # Whether EnPhase rotates the refresh token is not known yet; these two
+    # booleans answer it without logging any token.
+    logger.info(
+        "refreshed EnPhase token for account %s (refresh token in response: %s, changed: %s)",
+        account_id,
+        "refresh_token" in data,
+        new_creds.refresh_token != creds.refresh_token,
     )
 
-    logger.info("refreshed EnPhase token for account %s", account_id)
+    # Persist new tokens to Mongo so the service survives restarts.
+    creds_dict = new_creds.model_dump(mode="json")
+    await _persist_credentials(db, account_id, creds_dict, seeded_at)
     return new_creds
+
+
+async def _persist_credentials(
+    db: AsyncDatabase,
+    account_id: str,
+    creds_dict: dict[str, Any],
+    seeded_at: datetime | None,
+) -> None:
+    """Store refreshed credentials, retrying Mongo errors with backoff.
+
+    Raises once every attempt has failed. A write that matches no document
+    (re-seeded or deleted meanwhile) is not an error and is not retried.
+    """
+    doc_filter = {"_id": _doc_id("enphase", account_id), "seeded_at": seeded_at}
+    delays = (*PERSIST_BACKOFF_SECONDS, None)
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            result = await db.api_configs.update_one(
+                doc_filter,
+                {"$set": {"credentials": creds_dict, "updated_at": datetime.now(UTC)}},
+            )
+        except PyMongoError as exc:
+            if delay is None:
+                raise RuntimeError(
+                    f"EnPhase token for {account_id} was refreshed but could not be "
+                    f"stored after {attempt} attempts; if EnPhase rotated the refresh "
+                    f"token, the account needs re-authorization"
+                ) from exc
+            logger.warning(
+                "storing refreshed EnPhase token for %s failed (attempt %d/%d), retrying in %ss: %s",
+                account_id, attempt, len(delays), delay, type(exc).__name__,
+            )
+            await asyncio.sleep(delay)
+            continue
+        if result.matched_count == 0:
+            logger.warning(
+                "refreshed EnPhase token for %s not stored: account was re-seeded "
+                "or removed meanwhile",
+                account_id,
+            )
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +306,9 @@ async def fetch_cycle(
     # 1. Token refresh.
     refreshed = False
     if should_refresh(creds.expires_at):
-        creds = await refresh_access_token(client, creds, db, api_config.account_id)
+        creds = await refresh_access_token(
+            client, creds, db, api_config.account_id, seeded_at=api_config.seeded_at
+        )
         refreshed = True
 
     async def attempt(c: EnphaseCredentials) -> Any:
@@ -262,7 +324,9 @@ async def fetch_cycle(
         # this cycle already refreshed, the token really is rejected.
         if refreshed:
             raise
-        creds = await refresh_access_token(client, creds, db, api_config.account_id)
+        creds = await refresh_access_token(
+            client, creds, db, api_config.account_id, seeded_at=api_config.seeded_at
+        )
         raw_body = await attempt(creds)
 
     return [("inverter_summary", raw_body)]
