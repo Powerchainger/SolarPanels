@@ -205,6 +205,13 @@ async def test_fetch_job_writes_raw_and_processed():
     raw_doc = db.raw_responses.insert_one.call_args[0][0]
     assert isinstance(raw_doc["created_at"], datetime)
     assert raw_doc["body"]["data"] == {"pac": "1500", "ppv": "3200", "bdc1Soc": "85"}
+    # processed_results dates are dates too, on insert and on the post-outcome update.
+    pr_doc = db.processed_results.insert_one.call_args[0][0]
+    assert isinstance(pr_doc["created_at"], datetime)
+    assert isinstance(pr_doc["last_attempt_at"], datetime)
+    assert pr_doc["status"] == "posting"
+    pr_update = db.processed_results.update_one.call_args[0][1]["$set"]
+    assert isinstance(pr_update["last_attempt_at"], datetime)
 
 
 async def test_fetch_job_skipps_missing_config():
@@ -432,7 +439,7 @@ async def test_flush_job_retries_failed_records():
         "status": RecordStatus.FAILED,
         "retry_count": 1,
         "last_error": "HTTP 503",
-        "last_attempt_at": "2026-07-17T11:00:00+00:00",
+        "last_attempt_at": datetime(2026, 7, 17, 11, 0, tzinfo=UTC),
     }
 
     db = MagicMock()
@@ -473,7 +480,7 @@ async def test_flush_job_exhausts_retries_stays_failed():
         "status": RecordStatus.FAILED,
         "retry_count": 4,  # max_retries=5, so this is the 5th attempt
         "last_error": "HTTP 503",
-        "last_attempt_at": "2026-07-17T11:00:00+00:00",
+        "last_attempt_at": datetime(2026, 7, 17, 11, 0, tzinfo=UTC),
     }
 
     db = MagicMock()
@@ -514,7 +521,7 @@ async def test_flush_job_reclaims_stale_posting_records():
         "status": RecordStatus.POSTING,
         "retry_count": 0,
         "last_error": None,
-        "last_attempt_at": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+        "last_attempt_at": datetime.now(UTC) - timedelta(minutes=10),
     }
 
     db = MagicMock()
@@ -539,3 +546,8 @@ async def test_flush_job_reclaims_stale_posting_records():
     call_args = db.processed_results.update_one.call_args[0]
     update_dict = call_args[1]["$set"]
     assert update_dict["status"] == RecordStatus.POSTED
+    # Dates, not ISO strings: Mongo compares a date with an ISO string by
+    # BSON type, not by time, so the stale query must use dates.
+    stale_query = db.processed_results.find.call_args_list[1][0][0]
+    assert isinstance(stale_query["last_attempt_at"]["$lt"], datetime)
+    assert isinstance(update_dict["last_attempt_at"], datetime)

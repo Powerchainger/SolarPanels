@@ -209,7 +209,9 @@ async def fetch_job(
             last_attempt_at=now,
             created_at=now,
         )
-        pr_doc = pr.model_dump(mode="json")
+        # Python mode: dates stay BSON dates, so date queries (and a future TTL)
+        # compare dates, not strings.
+        pr_doc = pr.model_dump()
         insert_result = await db.processed_results.insert_one(pr_doc)
         pr_id = insert_result.inserted_id
         pr_doc["_id"] = pr_id
@@ -236,7 +238,7 @@ async def fetch_job(
         update: dict[str, Any] = {
             "status": new_status,
             "last_error": last_error,
-            "last_attempt_at": now.isoformat(),
+            "last_attempt_at": now,
             "retry_count": 0,
         }
 
@@ -294,7 +296,7 @@ async def flush_job(
 
         update: dict[str, Any] = {
             "retry_count": new_retry_count,
-            "last_attempt_at": now.isoformat(),
+            "last_attempt_at": now,
         }
 
         if result.success:
@@ -328,7 +330,7 @@ async def flush_job(
     stale_cutoff = now - timedelta(seconds=stale_seconds)
     query_stale = {
         "status": RecordStatus.POSTING,
-        "last_attempt_at": {"$lt": stale_cutoff.isoformat()},
+        "last_attempt_at": {"$lt": stale_cutoff},
     }
 
     stale_cursor = db.processed_results.find(query_stale).limit(100)
@@ -343,7 +345,7 @@ async def flush_job(
             token=output_token,
         )
 
-        update = {"last_attempt_at": now.isoformat()}
+        update = {"last_attempt_at": now}
         if result.success:
             update["status"] = RecordStatus.POSTED
             update["last_error"] = None
