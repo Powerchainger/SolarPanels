@@ -82,8 +82,13 @@ class TimedClient(httpx.AsyncClient):
     """httpx.AsyncClient subclass that emits structured request/response logs.
 
     Drop-in replacement for httpx.AsyncClient.  Logs every request at DEBUG
-    and every response with status-dependent level.
+    and every response with status-dependent level.  Defaults to
+    `DEFAULT_TIMEOUT` rather than httpx's 5 s, which is too short for the
+    EnPhase API; pass `timeout=` to override.
     """
+
+    def __init__(self, *, timeout: httpx.Timeout = DEFAULT_TIMEOUT, **kwargs) -> None:
+        super().__init__(timeout=timeout, **kwargs)
 
     async def send(self, request: Request, **kwargs) -> Response:  # type: ignore[override]
         log_request(request)

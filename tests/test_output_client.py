@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from clients.base import TimedClient, create_client
+from clients.base import DEFAULT_TIMEOUT, TimedClient, create_client
 from clients.output import ErrorClass, PostResult, post_record
 from db.models import RecordStatus
 
@@ -27,6 +27,16 @@ def test_create_client_returns_async_client():
 def test_create_client_with_base_url():
     client = create_client(base_url="https://api.example.com")
     assert client.base_url == httpx.URL("https://api.example.com")
+
+
+def test_timed_client_defaults_to_default_timeout():
+    # httpx's own default is a 5 s read timeout, which EnPhase exceeds.
+    assert TimedClient().timeout == DEFAULT_TIMEOUT
+    assert DEFAULT_TIMEOUT.read == 30.0
+
+
+def test_timed_client_timeout_can_be_overridden():
+    assert TimedClient(timeout=httpx.Timeout(2.0)).timeout == httpx.Timeout(2.0)
 
 
 def test_create_client_default_headers():
