@@ -5,6 +5,7 @@ Commands:
                    After this, the running service will handle token exchange.
   growatt set      Create/update a Growatt account with a static API token.
   list               Show all api_configs documents.
+  migrate-raw-dates  Convert string created_at in raw_responses to dates.
   delete             Remove an api_configs document by (provider, account_id).
 
 No live API calls are made by this script — it only reads/writes MongoDB.
@@ -285,6 +286,86 @@ async def _migrate(*, decrypt: bool, dry_run: bool) -> None:
         typer.echo(f"{changed}/{total} api_configs doc(s) {verb}")
     if skipped:
         typer.echo(f"  {skipped} doc(s) skipped (no credentials dict)")
+
+
+# ---------------------------------------------------------------------------
+# migrate-raw-dates
+# ---------------------------------------------------------------------------
+
+RAW_DATES_BATCH = 1000
+
+
+@app.command("migrate-raw-dates")
+def migrate_raw_dates(
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Report what would change without writing to MongoDB",
+    ),
+) -> None:
+    """Convert string `created_at` values in raw_responses to BSON dates.
+
+    The TTL index only expires BSON dates, so a document whose `created_at`
+    is an ISO string is kept forever. Once converted, documents older than
+    RAW_TTL_DAYS are deleted by MongoDB's TTL monitor within about a minute;
+    the dry run reports how many. Idempotent: only string values are touched.
+    Take a mongodump backup to ./backups/ first.
+    """
+    ttl_days = int(os.environ.get("RAW_TTL_DAYS", "30"))
+    asyncio.run(_migrate_raw_dates(_mongo(), dry_run=dry_run, ttl_days=ttl_days))
+
+
+def _parse_created_at(value: str) -> datetime | None:
+    """Parse a stored ISO timestamp as an aware UTC datetime, or None."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+async def _migrate_raw_dates(db, *, dry_run: bool, ttl_days: int) -> None:
+    from pymongo import UpdateOne
+
+    col = db.raw_responses
+    cutoff = datetime.now(UTC) - timedelta(days=ttl_days)
+    converted = expired = unparseable = 0
+    batch: list[UpdateOne] = []
+
+    async def flush() -> None:
+        nonlocal batch
+        ops, batch = batch, []
+        if ops and not dry_run:
+            await col.bulk_write(ops, ordered=False)
+
+    cursor = col.find({"created_at": {"$type": "string"}}, {"created_at": 1})
+    async for doc in cursor:
+        parsed = _parse_created_at(doc["created_at"])
+        if parsed is None:
+            unparseable += 1
+            continue
+        converted += 1
+        if parsed < cutoff:
+            expired += 1
+        # Matching on the old string keeps a re-run or concurrent write safe.
+        batch.append(UpdateOne(
+            {"_id": doc["_id"], "created_at": doc["created_at"]},
+            {"$set": {"created_at": parsed}},
+        ))
+        if len(batch) >= RAW_DATES_BATCH:
+            await flush()
+    await flush()
+
+    prefix = "[dry-run] " if dry_run else ""
+    verb = "would be converted" if dry_run else "converted"
+    typer.echo(f"{prefix}{converted} raw_responses doc(s) {verb}")
+    typer.echo(
+        f"{prefix}  {expired} of them are older than {ttl_days} days and "
+        f"{'would be' if dry_run else 'will be'} deleted by the TTL index"
+    )
+    if unparseable:
+        typer.echo(f"  {unparseable} doc(s) skipped (created_at not an ISO timestamp)")
 
 
 # ---------------------------------------------------------------------------

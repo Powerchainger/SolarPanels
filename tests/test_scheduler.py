@@ -201,6 +201,10 @@ async def test_fetch_job_writes_raw_and_processed():
     db.raw_responses.insert_one.assert_called_once()
     db.processed_results.insert_one.assert_called_once()
     db.processed_results.update_one.assert_called_once()
+    # The TTL index on created_at only expires a real date, not an ISO string.
+    raw_doc = db.raw_responses.insert_one.call_args[0][0]
+    assert isinstance(raw_doc["created_at"], datetime)
+    assert raw_doc["body"]["data"] == {"pac": "1500", "ppv": "3200", "bdc1Soc": "85"}
 
 
 async def test_fetch_job_skipps_missing_config():

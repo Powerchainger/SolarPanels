@@ -180,3 +180,92 @@ def test_health_summary():
     dead = {**ok, "consecutive_failures": 3, "auth_failed": True}
     out = _health(dead)
     assert "failures=3" in out and "AUTH FAILED" in out
+
+
+# ---------------------------------------------------------------------------
+# migrate-raw-dates
+# ---------------------------------------------------------------------------
+
+
+class _Cursor:
+    def __init__(self, docs):
+        self._docs = iter(docs)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._docs)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def _raw_db(docs):
+    from unittest.mock import AsyncMock, MagicMock
+
+    db = MagicMock()
+    db.raw_responses.find = MagicMock(return_value=_Cursor(docs))
+    db.raw_responses.bulk_write = AsyncMock()
+    return db
+
+
+def test_parse_created_at_formats():
+    from datetime import UTC, datetime
+
+    from manage_keys import _parse_created_at
+
+    want = datetime(2026, 10, 7, 12, 51, 9, 156601, tzinfo=UTC)
+    assert _parse_created_at("2026-10-07T12:51:09.156601Z") == want
+    assert _parse_created_at("2026-10-07T12:51:09.156601+00:00") == want
+    assert _parse_created_at("2026-10-07T14:51:09.156601+02:00") == want
+    assert _parse_created_at("2026-10-07T12:51:09.156601") == want  # naive → UTC
+    assert _parse_created_at("not a date") is None
+
+
+async def test_migrate_raw_dates_converts_strings_only(capsys):
+    from datetime import UTC, datetime, timedelta
+
+    from manage_keys import _migrate_raw_dates
+
+    old = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    new = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    db = _raw_db([
+        {"_id": 1, "created_at": old},
+        {"_id": 2, "created_at": new},
+        {"_id": 3, "created_at": "garbage"},
+    ])
+
+    await _migrate_raw_dates(db, dry_run=False, ttl_days=30)
+
+    query = db.raw_responses.find.call_args[0][0]
+    assert query == {"created_at": {"$type": "string"}}
+    ops = db.raw_responses.bulk_write.call_args[0][0]
+    assert [op._filter for op in ops] == [
+        {"_id": 1, "created_at": old},
+        {"_id": 2, "created_at": new},
+    ]
+    assert all(isinstance(op._doc["$set"]["created_at"], datetime) for op in ops)
+    out = capsys.readouterr().out
+    assert "2 raw_responses doc(s) converted" in out
+    assert "1 of them are older than 30 days" in out
+    assert "1 doc(s) skipped" in out
+
+
+async def test_migrate_raw_dates_dry_run_writes_nothing(capsys):
+    from manage_keys import _migrate_raw_dates
+
+    db = _raw_db([{"_id": 1, "created_at": "2026-01-01T00:00:00Z"}])
+    await _migrate_raw_dates(db, dry_run=True, ttl_days=30)
+    db.raw_responses.bulk_write.assert_not_called()
+    assert "[dry-run] 1 raw_responses doc(s) would be converted" in capsys.readouterr().out
+
+
+async def test_migrate_raw_dates_batches(monkeypatch):
+    import manage_keys
+
+    monkeypatch.setattr(manage_keys, "RAW_DATES_BATCH", 2)
+    db = _raw_db([{"_id": i, "created_at": "2026-01-01T00:00:00Z"} for i in range(5)])
+    await manage_keys._migrate_raw_dates(db, dry_run=False, ttl_days=30)
+    sizes = [len(c[0][0]) for c in db.raw_responses.bulk_write.call_args_list]
+    assert sizes == [2, 2, 1]
