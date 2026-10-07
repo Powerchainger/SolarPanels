@@ -211,7 +211,10 @@ async def heartbeat(
     )
 
     while not (stop_event and stop_event.is_set()):
-        for acct in accounts:
+        # Mutating `accounts` while iterating it would skip the account after
+        # each removal, so collect the lost ones and drop them after the loop.
+        lost: list[ApiConfig] = []
+        for acct in list(accounts):
             try:
                 ok = await renew_lease(
                     db, acct.provider, acct.account_id, worker_id,
@@ -223,12 +226,15 @@ async def heartbeat(
                         "lost lease on %s::%s — removing from active accounts",
                         acct.provider, acct.account_id,
                     )
-                    accounts.remove(acct)
+                    lost.append(acct)
             except Exception:
                 logger.exception(
                     "heartbeat error for %s::%s",
                     acct.provider, acct.account_id,
                 )
+
+        # In place: main.py releases whatever is left in its `claimed` list at shutdown.
+        accounts[:] = [a for a in accounts if not any(a is x for x in lost)]
 
         try:
             await asyncio.wait_for(

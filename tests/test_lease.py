@@ -254,3 +254,52 @@ async def test_heartbeat_removes_lost_leases():
 
     # The lost account should have been removed from the list.
     assert len(accounts) == 0
+
+
+async def test_heartbeat_lost_lease_does_not_skip_next_account():
+    """Dropping one account mid-loop must not stop renewal of the one after it."""
+    lost_id = "growatt::acc-1"
+    renewed: list[str] = []
+
+    async def update_one(filter, update):
+        result = MagicMock()
+        if filter["_id"] == lost_id:
+            result.modified_count = 0  # lease lost
+        else:
+            result.modified_count = 1
+            renewed.append(filter["_id"])
+        return result
+
+    db = MagicMock()
+    db.api_configs.update_one = update_one
+
+    accounts = [
+        ApiConfig(
+            provider="growatt",
+            account_id=f"acc-{n}",
+            interval_seconds=300,
+            credentials=GrowattCredentials(api_token="tok"),
+        )
+        for n in (1, 2, 3)
+    ]
+    shared = accounts  # the caller's list must be updated in place
+
+    stop_event = asyncio.Event()
+
+    async def stop_after_first_tick():
+        await asyncio.sleep(0.1)
+        stop_event.set()
+
+    await asyncio.gather(
+        heartbeat(
+            db, "worker-1", accounts,
+            ttl_multiplier=2, renewal_interval=1,
+            stop_event=stop_event,
+        ),
+        stop_after_first_tick(),
+    )
+
+    # Both surviving accounts were renewed in the first tick.
+    assert "growatt::acc-2" in renewed
+    assert "growatt::acc-3" in renewed
+    assert [a.account_id for a in shared] == ["acc-2", "acc-3"]
