@@ -28,7 +28,8 @@ cp .env.example .env   # then fill in MONGO_ROOT_USERNAME/PASSWORD and
 podman compose up -d mongo
 
 # 4. Seed credentials
-uv run python manage_keys.py growatt set --account-id my-home --api-token YOUR_TOKEN
+uv run python manage_keys.py growatt-set --account-id my-home --api-token YOUR_TOKEN
+uv run python manage_keys.py enphase-set --account-id my-home   # see "EnPhase accounts" below
 uv run python manage_keys.py list
 
 # 5. Run the service
@@ -36,6 +37,51 @@ uv run python main.py
 # or
 uv run solar-scraper
 ```
+
+### EnPhase accounts
+
+EnPhase uses OAuth2. Each account stores `client_id`, `client_secret`,
+`redirect_uri`, `api_key` and a token pair, all encrypted at rest except
+`client_id` and `redirect_uri`.
+
+**Token lifecycle.** The access token lasts about 24 h. Before every fetch the
+service checks it (`clients/enphase.py: fetch_cycle`) and, within 2 h of expiry,
+refreshes it with the refresh token (`refresh_access_token`). The new tokens are
+written back to MongoDB, so nothing needs doing by hand while the service runs.
+There is no CLI command for refreshing.
+
+**When it breaks.** The refresh token can die: the service was stopped long enough
+for it to lapse, a rotated token was lost, or the customer revoked access. Then every
+cycle fails at the refresh step with HTTP 401 (including
+`dev.py test-enphase`), and the account stays dead until it is re-authorized.
+Nothing in the service detects this yet; check the logs.
+
+**Authorizing (first time, or to recover).** `enphase-set` makes no API calls, so
+the token exchange happens outside the service:
+
+1. Open the authorization URL in a browser, signed in as the system owner, and approve:
+   `https://api.enphaseenergy.com/oauth/authorize?response_type=code&client_id=<CLIENT_ID>&redirect_uri=<REDIRECT_URI>`
+2. EnPhase redirects to `redirect_uri` with `?code=<AUTH_CODE>`. Copy the code. It is
+   short-lived and single-use.
+3. Exchange it for tokens with the legacy helper. Fill `EnPhase/access_gen.json`
+   (see `access_gen.json.example`), then, from inside `EnPhase/`:
+   ```bash
+   cd EnPhase && uv run python access_token_gen.py
+   ```
+   This writes `credentials.json` with `access_token`, `refresh_token` and `expires_in`.
+   Treat both JSON files as secrets and delete them afterwards.
+4. Seed the account (safe on a running service). Use `--from-file` so nothing lands in shell
+   history. The file needs `client_id`, `client_secret`, `redirect_uri`, `api_key`,
+   `access_token`, `refresh_token` and `expires_in`:
+   ```bash
+   uv run python manage_keys.py enphase-set --account-id my-home --from-file creds.json
+   ```
+5. Verify with `uv run python dev.py test-enphase --account-id my-home`, then restart.
+
+Re-seeding updates only credentials, interval and enabled flag. A running worker keeps its
+lease. The cached site (EnPhase) or plant/device list (Growatt) is kept on a token
+rotation and dropped only when the account's identity changes (a different `client_id`
+or Growatt `api_token`).
 
 ### MongoDB access control
 
@@ -113,7 +159,8 @@ uv run python dev.py test-enphase --account-id my-home
 
 # Manage credentials
 uv run python manage_keys.py list
-uv run python manage_keys.py growatt set --account-id my-home
+uv run python manage_keys.py growatt-set --account-id my-home
+uv run python manage_keys.py enphase-set --account-id my-home
 uv run python manage_keys.py delete --provider growatt --account-id my-home
 ```
 

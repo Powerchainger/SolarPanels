@@ -321,12 +321,54 @@ def _composite_id(provider: str, account_id: str) -> str:
     return f"{provider}::{account_id}"
 
 
+# Runtime state a running worker keeps on the document. Re-seeding must not
+# touch it, or the worker silently loses its lease (and re-pays the cache).
+_CACHE_FIELD = {"enphase": "site_cache", "growatt": "growatt_cache"}
+
+
+def _credential_identity(provider: str, creds: dict) -> object:
+    """What the cached data was derived from; a token rotation keeps it.
+
+    Decrypts via the models, so a stored value that cannot be decrypted
+    raises — the caller treats that as "identity changed".
+    """
+    if provider == "enphase":
+        return EnphaseCredentials.model_validate(creds).client_id
+    return GrowattCredentials.model_validate(creds).api_token
+
+
+def _identity_changed(existing: dict, cfg: ApiConfig) -> bool:
+    try:
+        old = _credential_identity(cfg.provider, existing["credentials"])
+        new = _credential_identity(cfg.provider, cfg.credentials.model_dump(mode="json"))
+    except Exception:  # noqa: BLE001 — unreadable old credentials: don't trust the cache
+        return True
+    return old != new
+
+
+def _plan_upsert(existing: dict | None, cfg: ApiConfig) -> dict:
+    """Build the update document for (re-)seeding one account.
+
+    New account: everything is written. Existing account: only the fields the
+    CLI controls are `$set`, so `lease` and the caches survive; the provider's
+    cache is dropped only when the credential identity changed.
+    """
+    doc = cfg.model_dump(mode="json")
+    doc["updated_at"] = datetime.now(UTC)
+    controlled = {k: doc[k] for k in ("credentials", "interval_seconds", "enabled", "updated_at")}
+    update: dict = {"$set": controlled}
+    if existing is None:
+        update["$setOnInsert"] = {k: v for k, v in doc.items() if k not in controlled}
+    elif _identity_changed(existing, cfg):
+        update["$unset"] = {_CACHE_FIELD[cfg.provider]: ""}
+    return update
+
+
 async def _upsert(cfg: ApiConfig) -> None:
     db = _mongo()
-    doc = cfg.model_dump(mode="json")
-    doc["_id"] = _composite_id(cfg.provider, cfg.account_id)
-    doc["updated_at"] = datetime.now(UTC)
-    await db.api_configs.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+    _id = _composite_id(cfg.provider, cfg.account_id)
+    existing = await db.api_configs.find_one({"_id": _id})
+    await db.api_configs.update_one({"_id": _id}, _plan_upsert(existing, cfg), upsert=True)
 
 
 async def _list() -> None:
