@@ -1,17 +1,23 @@
-# Exclude unnecessary files from Docker build context
-.git
-.pytest_cache
-__pycache__
-*.pyc
-*.pyo
-.env
-.env.example
-*.csv
-*.log
-*.ipynb
-EnPhase/
-Growatt/
-tests/
-*.json
+# Allow-list: the build context holds only what the app needs at runtime.
+# The Dockerfile copies the whole context into the image, and this directory
+# also holds mongodump backups, logs, .env and a host .venv — none of which
+# may end up in an image. A new file stays out until it is listed here.
+*
+
 !pyproject.toml
 !uv.lock
+!.python-version
+
+!main.py
+!config.py
+!crypto.py
+!leases.py
+!providers.py
+!manage_keys.py
+!clients/
+!db/
+!scheduler/
+!transform/
+
+**/__pycache__
+**/*.pyc
