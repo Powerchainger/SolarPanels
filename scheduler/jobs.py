@@ -188,11 +188,9 @@ async def fetch_job(
                 body={"label": label, "data": raw_body},
                 created_at=now,
             )
-            raw_doc = rr.model_dump(mode="json")
-            # The TTL index only expires BSON dates, not the ISO string the
-            # JSON dump makes of it.
-            raw_doc["created_at"] = rr.created_at
-            await db.raw_responses.insert_one(raw_doc)
+            # Python mode, not JSON: the TTL index on created_at only expires
+            # a BSON date, never an ISO string.
+            await db.raw_responses.insert_one(rr.model_dump())
 
     # --- Transform -----------------------------------------------------------
     try:
