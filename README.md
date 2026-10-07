@@ -79,9 +79,8 @@ the token exchange happens outside the service:
 5. Verify with `uv run python dev.py test-enphase --account-id my-home`, then restart.
 
 Re-seeding updates only credentials, interval and enabled flag. A running worker keeps its
-lease. The cached site (EnPhase) or plant/device list (Growatt) is kept on a token
-rotation and dropped only when the account's identity changes (a different `client_id`
-or Growatt `api_token`).
+lease. The cached EnPhase site is always dropped (one extra `/systems` call on the next
+cycle); the Growatt plant/device cache is dropped only when the `api_token` changes.
 
 ### MongoDB access control
 

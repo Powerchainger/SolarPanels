@@ -326,32 +326,30 @@ def _composite_id(provider: str, account_id: str) -> str:
 _CACHE_FIELD = {"enphase": "site_cache", "growatt": "growatt_cache"}
 
 
-def _credential_identity(provider: str, creds: dict) -> object:
-    """What the cached data was derived from; a token rotation keeps it.
+def _cache_stale(existing: dict, cfg: ApiConfig) -> bool:
+    """Whether the provider's cache may describe a different account now.
 
-    Decrypts via the models, so a stored value that cannot be decrypted
-    raises — the caller treats that as "identity changed".
+    EnPhase: always — the cached site_id is never re-validated, and a wrong
+    one yields wrong data without any error. Re-resolving costs one /systems
+    call. Growatt: only when the api_token changed (it is the account's
+    identity; the cache also expires on its own after 24 h). Old credentials
+    that cannot be decrypted count as a change.
     """
-    if provider == "enphase":
-        return EnphaseCredentials.model_validate(creds).client_id
-    return GrowattCredentials.model_validate(creds).api_token
-
-
-def _identity_changed(existing: dict, cfg: ApiConfig) -> bool:
-    try:
-        old = _credential_identity(cfg.provider, existing["credentials"])
-        new = _credential_identity(cfg.provider, cfg.credentials.model_dump(mode="json"))
-    except Exception:  # noqa: BLE001 — unreadable old credentials: don't trust the cache
+    if cfg.provider == "enphase":
         return True
-    return old != new
+    try:
+        old = GrowattCredentials.model_validate(existing["credentials"]).api_token
+    except Exception:  # noqa: BLE001
+        return True
+    return old != cfg.credentials.api_token
 
 
 def _plan_upsert(existing: dict | None, cfg: ApiConfig) -> dict:
     """Build the update document for (re-)seeding one account.
 
     New account: everything is written. Existing account: only the fields the
-    CLI controls are `$set`, so `lease` and the caches survive; the provider's
-    cache is dropped only when the credential identity changed.
+    CLI controls are `$set`, so `lease` survives; the provider's cache is
+    dropped when `_cache_stale` says so.
     """
     doc = cfg.model_dump(mode="json")
     doc["updated_at"] = datetime.now(UTC)
@@ -359,7 +357,7 @@ def _plan_upsert(existing: dict | None, cfg: ApiConfig) -> dict:
     update: dict = {"$set": controlled}
     if existing is None:
         update["$setOnInsert"] = {k: v for k, v in doc.items() if k not in controlled}
-    elif _identity_changed(existing, cfg):
+    elif _cache_stale(existing, cfg):
         update["$unset"] = {_CACHE_FIELD[cfg.provider]: ""}
     return update
 

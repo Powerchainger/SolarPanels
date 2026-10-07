@@ -101,14 +101,15 @@ def test_plan_new_account_inserts_everything():
     assert "$unset" not in up
 
 
-def test_plan_token_rotation_keeps_lease_and_cache():
+def test_plan_enphase_reseed_keeps_lease_and_drops_only_site_cache():
     up = _plan_upsert(_stored(_enphase_cfg(refresh="rt-old")), _enphase_cfg(refresh="rt-new"))
-    assert "$unset" not in up and "$setOnInsert" not in up
+    assert "$setOnInsert" not in up
+    assert up["$unset"] == {"site_cache": ""}
     assert not {"lease", "site_cache", "growatt_cache"} & set(up["$set"])
     assert up["$set"]["credentials"]["refresh_token"] != "rt-old"
 
 
-def test_plan_enphase_client_change_drops_only_site_cache():
+def test_plan_enphase_client_change_also_drops_site_cache():
     up = _plan_upsert(_stored(_enphase_cfg("cid")), _enphase_cfg("other"))
     assert up["$unset"] == {"site_cache": ""}
 
