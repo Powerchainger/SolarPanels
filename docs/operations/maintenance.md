@@ -61,9 +61,15 @@ podman compose start app
 
 ```bash
 git pull
-podman compose up -d --build app
+podman compose build app
+podman compose up -d --force-recreate app
 podman compose logs -f app
 ```
+
+Use these two steps rather than `podman compose up -d --build app`: with
+podman-compose (1.5.0 at least) that rebuilds the image but keeps running
+the existing container on the old one. To check which image runs:
+`podman ps --format "{{.Names}} {{.ImageID}}"`.
 
 Take a backup first. Check the release notes or commit history for changes
 that need extra steps, for example new settings in `.env.example`.

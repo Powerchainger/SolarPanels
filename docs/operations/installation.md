@@ -98,7 +98,8 @@ uv run python dev.py test-growatt --account-id my-home
 ## 5. Start the service
 
 ```bash
-podman compose up -d --build
+podman compose build app
+podman compose up -d
 podman compose logs -f app
 ```
 

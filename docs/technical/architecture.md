@@ -139,7 +139,11 @@ OCI images, which do not support `HEALTHCHECK`.
 uv sync --all-extras
 uv run pytest tests/
 uv run python dev.py serve     # local echo server that prints received records
+uv run --group docs zensical serve   # preview these docs
 ```
+
+Run the tests with `uv run --all-extras`: a plain `uv run` syncs the
+environment without the test extras and removes pytest.
 
 The `flake.nix` dev shell is optional; uv alone is enough. Design history
 and decisions are in `PLAN.md` and `IMPL.md`.

@@ -89,7 +89,8 @@ registered at developer-v4.enphase.com):
 
 - `client_id` and `client_secret`
 - `api_key`
-- `redirect_uri` (as registered for the application)
+- `redirect_uri` (as registered for the application; EnPhase's default is
+  `https://api.enphaseenergy.com/oauth/redirect_uri`)
 
 and the **system owner**, who must log in and approve.
 
