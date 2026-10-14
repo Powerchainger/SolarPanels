@@ -44,13 +44,18 @@ from crypto import decrypt_str, encrypt_str, is_encrypted
 class RecordStatus(StrEnum):
     """Lifecycle state of a ProcessedRecord.
 
-    Allowed transitions:
-        pending  → posting → posted
-        pending  → posting → failed   (permanent error, e.g. HTTP 4xx)
-        failed   → posting → posted   (recovered by the flush job)
+    Transitions as implemented:
+        fetch_job inserts records as `posting` and POSTs them at once:
+            posting → posted
+            posting → failed    (permanent error, e.g. HTTP 4xx)
+            posting → posting   (transient error; reclaimed by the flush job
+                                 once last_attempt_at is stale)
+        flush_job retries `failed` (and `pending`) while retry_count < max:
+            failed  → posted / failed
 
-    The posting state is set atomically (findOneAndUpdate) before each POST
-    attempt so two workers never send the same record simultaneously.
+    `pending` is the model default but no code path writes it today; the
+    flush job still picks it up. Nothing claims a record before a POST, so
+    two workers' flush jobs could send the same record twice.
     """
 
     PENDING = "pending"

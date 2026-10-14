@@ -243,8 +243,9 @@ def migrate_encrypt(
     model round-trip). Run with the service stopped, AFTER a mongodump
     backup to ./backups/.
 
-    Rotation path: set the new ENCRYPTION_KEY, then run this command once
-    (encrypt pass re-encrypts with the new key), then the old key is dead.
+    Rotation path: with the OLD key set, run `--decrypt`; then set the new
+    ENCRYPTION_KEY and run the encrypt pass. A plain encrypt pass with the
+    new key does not rotate: it skips values that are already ciphertext.
     """
     asyncio.run(_migrate(decrypt=decrypt, dry_run=dry_run))
 

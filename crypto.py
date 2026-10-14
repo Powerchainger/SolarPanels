@@ -6,8 +6,9 @@ actually touches credentials, while the app fails fast at boot via
 config.py's required field + format validator.
 
 A lost key = all stored credentials unrecoverable. Back up ENCRYPTION_KEY
-with the backups in ./backups/. Key rotation = re-run
-`manage-keys migrate-encrypt` with the new key.
+with the backups in ./backups/. Key rotation = `manage_keys.py
+migrate-encrypt --decrypt` with the old key, then `migrate-encrypt` with the
+new one (see its docstring).
 """
 
 from __future__ import annotations
