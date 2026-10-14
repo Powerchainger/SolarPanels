@@ -26,3 +26,8 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[dependency-groups]
+docs = [
+    "zensical>=0.0.70",
+]

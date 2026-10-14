@@ -18,3 +18,7 @@ logs
 
 # mongodump backups — keep the project's data inside the project
 backups/
+
+# docs build output (zensical)
+site/
+.cache/
