@@ -17,10 +17,6 @@ dependencies = [
     "tzdata>=2024.2",
 ]
 
-[project.scripts]
-manage-keys = "manage_keys:app"
-dev = "dev:app"
-
 [project.optional-dependencies]
 dev = [
     "respx>=0.21",

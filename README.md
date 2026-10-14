@@ -34,8 +34,6 @@ uv run python manage_keys.py list
 
 # 5. Run the service
 uv run python main.py
-# or
-uv run solar-scraper
 ```
 
 ### EnPhase accounts
