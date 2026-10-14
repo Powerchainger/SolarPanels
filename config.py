@@ -25,6 +25,9 @@ Optional variables (defaults shown):
                       (default: "INFO")
     RAW_TTL_DAYS      How long raw API responses are kept in MongoDB before the
                       TTL index deletes them. (default: 30)
+    POSTED_TTL_DAYS   How long records are kept in MongoDB after they were
+                      delivered to the output API. `inf` keeps them forever.
+                      Undelivered records are never deleted. (default: 7)
     THREADPOOL_WORKERS  Max threads for wrapping synchronous Growatt SDK calls
                         via asyncio.to_thread. One thread is held per in-flight
                         Growatt account cycle. (default: 32)
@@ -44,6 +47,8 @@ Optional variables (defaults shown):
                               Must be > 0. (default: 50)
 """
 
+import math
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -62,12 +67,22 @@ class Settings(BaseSettings):
     output_api_token: str = ""
     log_level: str = "INFO"
     raw_ttl_days: int = 30
+    # float so that "inf" (keep forever) parses; MongoDB caps a TTL at
+    # 2**31 - 1 seconds (~68 years), so a finite value must stay below that.
+    posted_ttl_days: float = Field(default=7, gt=0)
     threadpool_workers: int = 32
     worker_id: str
     lease_ttl_multiplier: int = 2
     lease_renewal_interval: int = 30
     shutdown_timeout_seconds: float = Field(default=50, gt=0)
     encryption_key: str
+
+    @field_validator("posted_ttl_days")
+    @classmethod
+    def _posted_ttl_fits_mongo(cls, v: float) -> float:
+        if not math.isinf(v) and v * 86400 > 2**31 - 1:
+            raise ValueError("too large for MongoDB; use `inf` to keep records forever")
+        return v
 
     @field_validator("encryption_key")
     @classmethod

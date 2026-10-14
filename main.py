@@ -52,7 +52,9 @@ async def _main() -> None:
 
     # --- MongoDB --------------------------------------------------------
     db = await get_db(settings.mongo_uri)
-    await init_indexes(db, ttl_days=settings.raw_ttl_days)
+    await init_indexes(
+        db, ttl_days=settings.raw_ttl_days, posted_ttl_days=settings.posted_ttl_days
+    )
 
     # --- Probe output API ----------------------------------------------
     # Before claiming leases: exiting here holds nothing, so the restart
