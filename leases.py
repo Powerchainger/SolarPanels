@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from pymongo.asynchronous.database import AsyncDatabase
@@ -200,11 +201,13 @@ async def heartbeat(
     ttl_multiplier: int,
     renewal_interval: int = 30,
     stop_event: asyncio.Event | None = None,
+    alive_file: str | None = None,
 ) -> None:
     """Periodic heartbeat coroutine: renew leases for all claimed accounts.
 
     Runs in a loop until `stop_event` is set or the coroutine is cancelled.
-    Sleeps `renewal_interval` seconds between ticks.
+    Sleeps `renewal_interval` seconds between ticks. Each tick touches
+    `alive_file`, if given, for the container health check (healthcheck.py).
     """
     logger.info(
         "heartbeat started for worker %s (%d accounts, interval=%ds)",
@@ -212,6 +215,11 @@ async def heartbeat(
     )
 
     while not (stop_event and stop_event.is_set()):
+        if alive_file:
+            try:
+                Path(alive_file).touch()
+            except OSError:
+                logger.warning("could not touch %s; health check will fail", alive_file)
         # Mutating `accounts` while iterating it would skip the account after
         # each removal, so collect the lost ones and drop them after the loop.
         lost: list[ApiConfig] = []

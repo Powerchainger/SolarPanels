@@ -31,8 +31,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 RUN useradd --create-home --shell /bin/bash app
 USER app
 
-# Health check: simple Python check that can import the main module
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import main; print('ok')" || exit 1
-
 ENTRYPOINT ["python", "main.py"]

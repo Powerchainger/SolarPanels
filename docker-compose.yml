@@ -40,6 +40,15 @@ services:
     # Must exceed SHUTDOWN_TIMEOUT_SECONDS (default 50) + 10 s (see config.py),
     # so running jobs can finish and leases get released before SIGKILL.
     stop_grace_period: 70s
+    # Here rather than in the Dockerfile: podman builds OCI images, which
+    # drop HEALTHCHECK. Fails when the service's heartbeat stalls (see
+    # healthcheck.py); it reports, it does not restart the container.
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

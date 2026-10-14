@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 
 from config import Settings
+from healthcheck import ALIVE_FILE
 from db.mongo import get_db, init_indexes
 from leases import claim_leases, heartbeat, release_lease
 from scheduler.jobs import (
@@ -155,6 +156,7 @@ async def _main() -> None:
             ttl_multiplier=settings.lease_ttl_multiplier,
             renewal_interval=settings.lease_renewal_interval,
             stop_event=heartbeat_stop,
+            alive_file=ALIVE_FILE,
         )
     )
 

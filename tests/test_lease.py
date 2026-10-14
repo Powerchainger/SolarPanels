@@ -303,3 +303,25 @@ async def test_heartbeat_lost_lease_does_not_skip_next_account():
     assert "growatt::acc-2" in renewed
     assert "growatt::acc-3" in renewed
     assert [a.account_id for a in shared] == ["acc-2", "acc-3"]
+
+
+async def test_heartbeat_touches_alive_file(tmp_path):
+    """The container health check reads this file's age (healthcheck.py)."""
+    db = MagicMock()
+    alive = tmp_path / "alive"
+    stop_event = asyncio.Event()
+
+    async def stop_after_tick():
+        await asyncio.sleep(0.05)
+        stop_event.set()
+
+    # No accounts: an idle worker is still alive.
+    await asyncio.gather(
+        heartbeat(
+            db, "worker-1", [], ttl_multiplier=2, renewal_interval=1,
+            stop_event=stop_event, alive_file=str(alive),
+        ),
+        stop_after_tick(),
+    )
+
+    assert alive.exists()

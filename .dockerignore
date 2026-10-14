@@ -9,6 +9,7 @@
 !.python-version
 
 !main.py
+!healthcheck.py
 !config.py
 !crypto.py
 !leases.py
