@@ -87,7 +87,7 @@ def _stored(cfg: ApiConfig) -> dict:
     doc = cfg.model_dump(mode="json")
     doc["_id"] = f"{cfg.provider}::{cfg.account_id}"
     doc["lease"] = {"worker_id": "w1", "expires_at": "2099-01-01T00:00:00Z"}
-    doc["site_cache"] = {"site_id": 1, "user": "u"}
+    doc["site_cache"] = {"site_id": 1}
     doc["growatt_cache"] = {"plant_id": "p", "devices": []}
     return doc
 

@@ -85,7 +85,8 @@ class SiteCache(BaseModel):
     """
 
     site_id: int
-    user: str  # site name, used as user_value in the processed row
+    # The site name (`user`) is deliberately not kept: it is often the
+    # owner's name. Older documents still carry it; it is ignored on load.
 
 
 class GrowattCache(BaseModel):

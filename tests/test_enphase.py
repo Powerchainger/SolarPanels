@@ -264,10 +264,10 @@ async def test_fetch_cycle_refresh_write_uses_config_seeded_at():
     )
     config = _make_config(
         credentials=_make_creds(expires_at=None),
-        site_cache=SiteCache(site_id=1, user="x"),
+        site_cache=SiteCache(site_id=1),
         seeded_at=seeded,
     )
-    db.api_configs.find_one = AsyncMock(return_value={"site_cache": {"site_id": 1, "user": "x"}})
+    db.api_configs.find_one = AsyncMock(return_value={"site_cache": {"site_id": 1}})
     async with TimedClient() as client:
         await fetch_cycle(db, config, client)
     filt = db.api_configs.update_one.call_args_list[0][0][0]
@@ -328,7 +328,7 @@ async def test_refresh_access_token_server_error_is_not_auth_failure():
 @respx.mock
 async def test_resolve_site_id_cache_hit():
     """When site_cache is already in Mongo, no API call is made."""
-    cached = SiteCache(site_id=99999, user="CachedSite")
+    cached = SiteCache(site_id=99999)
     db = _mock_db()
     db.api_configs.find_one = AsyncMock(return_value={
         "site_cache": cached.model_dump(mode="json"),
@@ -340,12 +340,13 @@ async def test_resolve_site_id_cache_hit():
         result = await resolve_site_id(client, creds, db, "acc-enphase", seeded_at=None)
 
     assert result.site_id == 99999
-    assert result.user == "CachedSite"
 
 
 @respx.mock
-async def test_resolve_site_id_cache_miss_fetches():
+async def test_resolve_site_id_cache_miss_fetches(caplog):
     """When no cache, fetches from /api/v4/systems and writes cache."""
+    import logging
+    caplog.set_level(logging.DEBUG)
     db = _mock_db()
     db.api_configs.find_one = AsyncMock(return_value=None)
 
@@ -359,10 +360,14 @@ async def test_resolve_site_id_cache_miss_fetches():
         result = await resolve_site_id(client, creds, db, "acc-enphase", seeded_at=None)
 
     assert result.site_id == 12345
-    assert result.user == "Sunnyville"
 
     # Cache written back to Mongo.
     db.api_configs.update_one.assert_called_once()
+
+    # The site name is personal data: neither stored nor logged.
+    stored = db.api_configs.update_one.call_args[0][1]["$set"]["site_cache"]
+    assert stored == {"site_id": 12345}
+    assert "Sunnyville" not in caplog.text
 
 
 @respx.mock
@@ -479,7 +484,7 @@ async def test_fetch_cycle_refreshes_expired_token():
 @respx.mock
 async def test_fetch_cycle_uses_site_cache():
     """When site_cache exists, /systems is NOT called."""
-    cached = SiteCache(site_id=55555, user="CachedSite")
+    cached = SiteCache(site_id=55555)
     db = _mock_db()
     db.api_configs.find_one = AsyncMock(return_value={
         "site_cache": cached.model_dump(mode="json"),
@@ -631,7 +636,7 @@ async def test_resolve_site_id_cache_write_is_conditioned_on_seeded_at():
 @respx.mock
 async def test_fetch_cycle_data_401_uses_credentials_refreshed_elsewhere():
     """Another process refreshed (maybe rotating the refresh token): use its tokens, don't refresh."""
-    cached = SiteCache(site_id=1, user="x")
+    cached = SiteCache(site_id=1)
     stored = _make_config(credentials=_make_creds(access_token="fresh-access"), site_cache=cached)
     db = _mock_db()
     db.api_configs.find_one = AsyncMock(return_value=_stored_doc(stored))
@@ -650,7 +655,7 @@ async def test_fetch_cycle_data_401_uses_credentials_refreshed_elsewhere():
 
 @respx.mock
 async def test_fetch_cycle_data_401_refreshes_stored_credentials_near_expiry():
-    cached = SiteCache(site_id=1, user="x")
+    cached = SiteCache(site_id=1)
     stored = _make_config(
         credentials=_make_creds(
             access_token="fresh-access", refresh_token="rotated-refresh",
@@ -675,7 +680,7 @@ async def test_fetch_cycle_data_401_refreshes_stored_credentials_near_expiry():
 
 @respx.mock
 async def test_fetch_cycle_data_401_unchanged_stored_credentials_forces_refresh():
-    cached = SiteCache(site_id=1, user="x")
+    cached = SiteCache(site_id=1)
     seeded = datetime(2026, 10, 1, 12, 0)
     config = _make_config(site_cache=cached, seeded_at=seeded)
     db = _mock_db()
@@ -697,7 +702,7 @@ async def test_fetch_cycle_data_401_unchanged_stored_credentials_forces_refresh(
 @respx.mock
 async def test_fetch_cycle_data_401_after_reseed_uses_new_seeded_at():
     """Re-seeded meanwhile: the stored credentials and their seeded_at are used together."""
-    cached = SiteCache(site_id=1, user="x")
+    cached = SiteCache(site_id=1)
     reseeded = datetime(2026, 10, 7, 9, 0)
     stored = _make_config(
         credentials=_make_creds(access_token="reseed-access", expires_at=None),

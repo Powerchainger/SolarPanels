@@ -206,7 +206,7 @@ async def resolve_site_id(
     *,
     seeded_at: datetime | None,
 ) -> SiteCache:
-    """Look up the site_id and site name from /api/v4/systems.
+    """Look up the site_id from /api/v4/systems.
 
     If the site_cache is already populated, returns the cached value
     without making an API call.  On cache miss, fetches and writes back
@@ -238,10 +238,8 @@ async def resolve_site_id(
     if not systems:
         raise RuntimeError(f"No systems found for EnPhase account {account_id}")
 
-    site_cache = SiteCache(
-        site_id=systems[0]["system_id"],
-        user=systems[0]["name"],
-    )
+    # Only the ID: the system's name is often the owner's name (personal data).
+    site_cache = SiteCache(site_id=systems[0]["system_id"])
 
     # Write cache back to Mongo.
     await db.api_configs.update_one(
@@ -252,7 +250,7 @@ async def resolve_site_id(
         }},
     )
 
-    logger.info("resolved site_id=%s user=%s for %s", site_cache.site_id, site_cache.user, account_id)
+    logger.info("resolved site_id=%s for %s", site_cache.site_id, account_id)
     return site_cache
 
 

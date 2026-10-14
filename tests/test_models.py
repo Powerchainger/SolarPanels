@@ -155,10 +155,11 @@ def test_api_config_with_lease():
 
 
 def test_api_config_with_site_cache():
+    """Older documents still carry the site name; it loads but is dropped."""
     cfg = _enphase_config(site_cache={"site_id": 42, "user": "Sunnyville"})
     assert isinstance(cfg.site_cache, SiteCache)
     assert cfg.site_cache.site_id == 42
-    assert cfg.site_cache.user == "Sunnyville"
+    assert "user" not in cfg.site_cache.model_dump()
 
 
 def test_api_config_ignores_removed_device_filter_field():
