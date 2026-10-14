@@ -17,6 +17,7 @@ import functools
 import os
 
 from cryptography.fernet import Fernet
+from dotenv import dotenv_values
 
 # Fernet tokens always start with this prefix — used to tell encrypted
 # values apart from plaintext ones (e.g. pre-migration docs).
@@ -35,7 +36,11 @@ SECRET_FIELDS = {
 
 
 def _get_key() -> str:
-    key = os.environ.get("ENCRYPTION_KEY", "")
+    # Same sources and precedence as config.Settings: the environment, then
+    # .env in the working directory. Reading only the environment made a bare
+    # `python main.py` (key in .env, not exported) pass the boot check in
+    # Settings and then fail every decrypt.
+    key = os.environ.get("ENCRYPTION_KEY") or dotenv_values(".env").get("ENCRYPTION_KEY") or ""
     if not key:
         raise RuntimeError(
             "ENCRYPTION_KEY is not set — refusing to encrypt/decrypt "

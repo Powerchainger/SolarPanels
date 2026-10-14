@@ -335,3 +335,36 @@ def test_processed_record_failed_state():
 def test_processed_record_missing_required():
     with pytest.raises(ValidationError):
         ProcessedRecord(provider="growatt", account_id="x")  # missing record
+
+
+def test_encryption_key_falls_back_to_dotenv(tmp_path, monkeypatch):
+    """Like Settings, crypto reads ENCRYPTION_KEY from .env when it is not exported."""
+    import crypto
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key().decode()
+    (tmp_path / ".env").write_text(f"ENCRYPTION_KEY={key}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ENCRYPTION_KEY")
+    crypto._fernet.cache_clear()
+    try:
+        token = crypto.encrypt_str("secret")
+        assert Fernet(key.encode()).decrypt(token.encode()) == b"secret"
+    finally:
+        crypto._fernet.cache_clear()  # later tests use the conftest key again
+
+
+def test_encryption_key_environment_wins_over_dotenv(tmp_path, monkeypatch):
+    import crypto
+    from cryptography.fernet import Fernet
+
+    (tmp_path / ".env").write_text(f"ENCRYPTION_KEY={Fernet.generate_key().decode()}\n")
+    monkeypatch.chdir(tmp_path)
+    env_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("ENCRYPTION_KEY", env_key)
+    crypto._fernet.cache_clear()
+    try:
+        token = crypto.encrypt_str("secret")
+        assert Fernet(env_key.encode()).decrypt(token.encode()) == b"secret"
+    finally:
+        crypto._fernet.cache_clear()
