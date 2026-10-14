@@ -1,0 +1,37 @@
+site_name: Solar Scraper
+site_description: Collects solar inverter data from EnPhase and Growatt and forwards it to an output API.
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Overview: index.md
+  - Operations:
+      - Concepts: operations/concepts.md
+      - Installation: operations/installation.md
+      - Configuration: operations/configuration.md
+      - Managing accounts: operations/accounts.md
+      - Monitoring: operations/monitoring.md
+      - Maintenance: operations/maintenance.md
+      - Troubleshooting: operations/troubleshooting.md
+  - Technical reference:
+      - Architecture: technical/architecture.md
