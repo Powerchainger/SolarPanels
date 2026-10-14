@@ -130,7 +130,7 @@ async def fetch_job(
         return
 
     now = datetime.now(UTC)
-    context: dict[str, Any] = {"timestamp": now}
+    context: dict[str, Any] = {"timestamp": now, "account_id": account_id}
 
     # --- Fetch ---------------------------------------------------------------
     try:

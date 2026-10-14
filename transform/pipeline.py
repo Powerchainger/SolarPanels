@@ -19,7 +19,7 @@ from transform.schemas import EnphaseRow, GrowattRow
 logger = logging.getLogger(__name__)
 
 
-def parse_enphase(raw_body: list | dict) -> list[EnphaseRow]:
+def parse_enphase(raw_body: list | dict, *, account_id: str) -> list[EnphaseRow]:
     """Parse EnPhase /api/v4/systems/inverters_summary_by_envoy_or_site response.
 
     The API returns a JSON array; element 0 contains a `micro_inverters` list.
@@ -73,6 +73,7 @@ def parse_enphase(raw_body: list | dict) -> list[EnphaseRow]:
 
     return [
         EnphaseRow(
+            account_id=account_id,
             timestamp=timestamp,
             inverters=inverters,
             total_power=total_power,
@@ -83,6 +84,8 @@ def parse_enphase(raw_body: list | dict) -> list[EnphaseRow]:
 def parse_growatt(
     device_responses: list[tuple[str, dict]],
     timestamp: datetime,
+    *,
+    account_id: str,
 ) -> list[GrowattRow]:
     """Parse per-device min_energy responses into GrowattRows.
 
@@ -90,6 +93,8 @@ def parse_growatt(
         device_responses: List of (device_sn, raw_response_dict) tuples.
                           The upstream client filters type==7 before calling this.
         timestamp:        UTC timestamp for this cycle (injected by caller).
+        account_id:       The account the responses belong to; copied into
+                          every row so the output API can tell accounts apart.
 
     Legacy field mapping (Growatt/measurements.py:39-53):
         pac     → ac_power_watts (float)
@@ -108,6 +113,7 @@ def parse_growatt(
     for device_sn, raw in device_responses:
         rows.append(
             GrowattRow(
+                account_id=account_id,
                 timestamp=timestamp,
                 device_sn=device_sn,
                 ac_power_watts=float(raw.get("pac", 0)),

@@ -41,17 +41,18 @@ GROWATT_DEVICE_RESPONSES: list[tuple[str, dict]] = [
 
 
 def test_parse_enphase_shape():
-    rows = parse_enphase(ENPHASE_RAW)
+    rows = parse_enphase(ENPHASE_RAW, account_id="acct")
     assert len(rows) == 1
     row = rows[0]
     assert isinstance(row, EnphaseRow)
+    assert row.account_id == "acct"
     assert not hasattr(row, "user_value")  # site name dropped (GDPR minimize)
     assert row.inverters == {"inverter_1": 150.5, "inverter_2": 200.3}
     assert row.total_power == pytest.approx(350.8)
 
 
 def test_parse_enphase_timestamp_is_utc():
-    rows = parse_enphase(ENPHASE_RAW)
+    rows = parse_enphase(ENPHASE_RAW, account_id="acct")
     ts = rows[0].timestamp
     assert ts.tzinfo is not None
     assert ts.utcoffset().total_seconds() == 0  # UTC
@@ -61,17 +62,17 @@ def test_parse_enphase_timestamp_is_utc():
 
 def test_parse_enphase_empty_body_raises():
     with pytest.raises(ValueError, match="empty"):
-        parse_enphase([])
+        parse_enphase([], account_id="acct")
 
 
 def test_parse_enphase_missing_inverters_raises():
     with pytest.raises(ValueError, match="micro_inverters"):
-        parse_enphase([{}])
+        parse_enphase([{}], account_id="acct")
 
 
 def test_parse_enphase_dict_input_accepted():
     """Accept a single dict instead of a list (API sometimes returns that)."""
-    rows = parse_enphase(ENPHASE_RAW[0])
+    rows = parse_enphase(ENPHASE_RAW[0], account_id="acct")
     assert len(rows) == 1
 
 
@@ -85,7 +86,7 @@ def test_parse_enphase_inverter_without_report_date_skipped():
             ]
         }
     ]
-    rows = parse_enphase(body)
+    rows = parse_enphase(body, account_id="acct")
     assert rows[0].inverters == {"inverter_1": 100.0}
     assert rows[0].total_power == pytest.approx(100.0)
 
@@ -97,10 +98,11 @@ def test_parse_enphase_inverter_without_report_date_skipped():
 
 def test_parse_growatt_shape():
     ts = datetime(2026, 7, 17, 12, 0, 0, tzinfo=UTC)
-    rows = parse_growatt(GROWATT_DEVICE_RESPONSES, timestamp=ts)
+    rows = parse_growatt(GROWATT_DEVICE_RESPONSES, timestamp=ts, account_id="acct")
     assert len(rows) == 2
 
     assert isinstance(rows[0], GrowattRow)
+    assert {r.account_id for r in rows} == {"acct"}
     assert rows[0].device_sn == "SN001"
     assert rows[0].ac_power_watts == pytest.approx(1500.0)
     assert rows[0].pv_power_watts == pytest.approx(3200.0)
@@ -114,7 +116,7 @@ def test_parse_growatt_shape():
 
 def test_parse_growatt_timestamps_are_utc():
     ts = datetime(2026, 7, 17, 14, 0, 0)  # naive — should be treated as UTC
-    rows = parse_growatt(GROWATT_DEVICE_RESPONSES, timestamp=ts)
+    rows = parse_growatt(GROWATT_DEVICE_RESPONSES, timestamp=ts, account_id="acct")
     for row in rows:
         assert row.timestamp.tzinfo is not None
         assert row.timestamp.utcoffset().total_seconds() == 0
@@ -126,14 +128,14 @@ def test_parse_growatt_coerces_string_values():
         ("SN001", {"pac": "1500.5", "ppv": "3200.7", "bdc1Soc": "85"}),
     ]
     ts = datetime(2026, 7, 17, 12, 0, 0, tzinfo=UTC)
-    rows = parse_growatt(responses, timestamp=ts)
+    rows = parse_growatt(responses, timestamp=ts, account_id="acct")
     assert rows[0].ac_power_watts == pytest.approx(1500.5)
     assert rows[0].pv_power_watts == pytest.approx(3200.7)
 
 
 def test_parse_growatt_empty_responses():
     ts = datetime(2026, 7, 17, 12, 0, 0, tzinfo=UTC)
-    rows = parse_growatt([], timestamp=ts)
+    rows = parse_growatt([], timestamp=ts, account_id="acct")
     assert rows == []
 
 
@@ -142,7 +144,7 @@ def test_parse_growatt_missing_fields_default_zero():
         ("SN001", {}),  # all fields missing
     ]
     ts = datetime(2026, 7, 17, 12, 0, 0, tzinfo=UTC)
-    rows = parse_growatt(responses, timestamp=ts)
+    rows = parse_growatt(responses, timestamp=ts, account_id="acct")
     assert rows[0].ac_power_watts == 0.0
     assert rows[0].pv_power_watts == 0.0
     assert rows[0].soc_percent == 0

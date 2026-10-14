@@ -31,6 +31,7 @@ class EnphaseRow(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    account_id: str               # as seeded with manage_keys.py
     timestamp: datetime           # UTC, from last_report_date of first inverter
     inverters: dict[str, float]   # {"inverter_1": 150.5, …}
     total_power: float            # sum of inverters values
@@ -46,6 +47,7 @@ class GrowattRow(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    account_id: str       # as seeded with manage_keys.py
     timestamp: datetime   # UTC, injected by the scheduler at cycle start
     device_sn: str
     ac_power_watts: float   # from `pac`

@@ -39,8 +39,9 @@ from clients.base import TimedClient
 #   - For Growatt: label = device_sn, raw = min_energy dict.
 #   - For EnPhase: label = "inverter_summary", raw = full response array.
 #
-# TransformFn receives the raw fetch output and a context dict, returns
-#   a list of row dicts (ready for ProcessedRecord.record).
+# TransformFn receives the raw fetch output and a context dict
+#   ({"timestamp", "account_id"}, built by fetch_job), returns a list of
+#   row dicts (ready for ProcessedRecord.record).
 FetchFn = Callable[
     [ApiConfig, AsyncDatabase, TimedClient],
     Awaitable[list[tuple[str, dict[str, Any]]]],
@@ -144,7 +145,7 @@ def _growatt_transform(
     from transform.pipeline import parse_growatt
 
     timestamp = context.get("timestamp") or datetime.now(UTC)
-    rows = parse_growatt(raw_responses, timestamp=timestamp)
+    rows = parse_growatt(raw_responses, timestamp=timestamp, account_id=context["account_id"])
     return [r.model_dump(mode="json") for r in rows]
 
 
@@ -177,7 +178,7 @@ def _enphase_transform(
 
     rows = []
     for _label, raw_body in raw_responses:
-        rows.extend(parse_enphase(raw_body))
+        rows.extend(parse_enphase(raw_body, account_id=context["account_id"]))
     return [r.model_dump(mode="json") for r in rows]
 
 

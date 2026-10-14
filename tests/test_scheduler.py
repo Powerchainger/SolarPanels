@@ -185,7 +185,7 @@ async def test_fetch_job_writes_raw_and_processed():
                 ("SN001", {"pac": "1500", "ppv": "3200", "bdc1Soc": "85"}),
             ])
             spec.transform = MagicMock(return_value=[
-                {"timestamp": "2026-07-17T12:00:00Z", "device_sn": "SN001",
+                {"account_id": "acc-1", "timestamp": "2026-07-17T12:00:00Z", "device_sn": "SN001",
                  "ac_power_watts": 1500.0, "pv_power_watts": 3200.0, "soc_percent": 85},
             ])
             mock_get_spec.return_value = spec
@@ -197,6 +197,8 @@ async def test_fetch_job_writes_raw_and_processed():
                 http_client=http_client,
             )
 
+    # The transform gets the account, so every record can name it.
+    assert spec.transform.call_args[0][1]["account_id"] == "acc-1"
     # Should have written raw response and processed record.
     db.raw_responses.insert_one.assert_called_once()
     db.processed_results.insert_one.assert_called_once()
