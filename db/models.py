@@ -51,11 +51,13 @@ class RecordStatus(StrEnum):
             posting → posting   (transient error; reclaimed by the flush job
                                  once last_attempt_at is stale)
         flush_job retries `failed` (and `pending`) while retry_count < max:
-            failed  → posted / failed
+            failed  → posting (claimed) → posted / failed
 
     `pending` is the model default but no code path writes it today; the
-    flush job still picks it up. Nothing claims a record before a POST, so
-    two workers' flush jobs could send the same record twice.
+    flush job still picks it up. The flush job claims each record atomically
+    (find_one_and_update) before its POST, so workers never send a record
+    at the same time. Delivery is at-least-once: a crash between a POST and
+    its status write leaves `posting`, which is sent again once stale.
     """
 
     PENDING = "pending"

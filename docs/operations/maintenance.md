@@ -148,6 +148,12 @@ How accounts are divided:
   `LEASE_TTL_MULTIPLIER`* and another worker claims the accounts within a
   minute after that. A worker that holds nothing simply waits, so a second
   worker also works as a standby.
-- Records stuck in delivery may occasionally be sent twice when several
-  workers retry at the same moment. Your output API should tolerate a
-  duplicate record.
+- Each worker needs its own `WORKER_ID`. Don't use
+  `podman compose up --scale app=2`: the replicas would share one
+  `WORKER_ID`, each would consider itself the holder of every lease, and
+  every account would be polled once per replica.
+- Retries are coordinated: each record is reserved before it is sent, so
+  workers don't deliver the same record at the same time. As with a single
+  worker, a crash between sending a record and recording that it was sent
+  means it is sent again later, so your output API should tolerate an
+  occasional duplicate.

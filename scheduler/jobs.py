@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_FLUSH_INTERVAL_SECONDS = 300
 DEFAULT_STALE_THRESHOLD_SECONDS = 300  # 5 minutes
+# Records per flush pass per run (both passes: up to 2× this per run).
+FLUSH_BATCH = 100
 
 # How often a worker re-claims leases: picks up new or re-enabled accounts,
 # changed intervals, and accounts a dead worker left behind.
@@ -280,6 +282,25 @@ async def fetch_job(
 # ---------------------------------------------------------------------------
 
 
+async def _claim_record(
+    db: AsyncDatabase, query: dict[str, Any], update: dict[str, Any], seen: list[Any]
+) -> dict[str, Any] | None:
+    """Atomically take one matching record, or return None when none is left.
+
+    The update moves the record out of `query` (status `posting`, or a fresh
+    `last_attempt_at`), so a concurrent flush on another worker cannot take
+    it too. `seen` excludes records this run already handled, so a record
+    that fails again is not retried a second time within the same run.
+    Returns the document as it was before the update.
+    """
+    doc = await db.processed_results.find_one_and_update(
+        {**query, "_id": {"$nin": seen}}, update
+    )
+    if doc is not None:
+        seen.append(doc["_id"])
+    return doc
+
+
 async def flush_job(
     db: AsyncDatabase,
     output_base_url: str,
@@ -291,28 +312,42 @@ async def flush_job(
 ) -> None:
     """Pick up unposted records and retry them.
 
-    Two queries:
+    Two passes, up to FLUSH_BATCH records each:
       1. status ∈ {pending, failed} AND retry_count < max_retries
-         → increment retry_count, POST, update status.
+         → claim (status posting, retry_count + 1), POST, update status.
       2. status = posting AND last_attempt_at < (now - stale_seconds)
-         → reclaim stale records left by a crashed worker.
+         → claim (fresh last_attempt_at), POST — reclaims records left by a
+         crashed worker.
+
+    Each record is claimed atomically before its POST, so several workers
+    can flush at once without sending a record twice. Delivery is still
+    at-least-once: a crash between a successful POST and the status write
+    leaves the record `posting`, and pass 2 sends it again.
 
     Records that exhaust retry_count stay as `failed` and are logged —
     they are never silently dropped.
     """
     now = datetime.now(UTC)
+    seen: list[Any] = []
 
     # --- Pass 1: pending/failed with retries remaining -----------------------
     query_retriable = {
         "status": {"$in": [RecordStatus.PENDING, RecordStatus.FAILED]},
         "retry_count": {"$lt": max_retries},
     }
+    claim_retriable = {
+        "$set": {"status": RecordStatus.POSTING, "last_attempt_at": now},
+        "$inc": {"retry_count": 1},
+    }
 
-    cursor = db.processed_results.find(query_retriable).limit(100)
     retried = 0
-    async for doc in cursor:
+    for _ in range(FLUSH_BATCH):
+        doc = await _claim_record(db, query_retriable, claim_retriable, seen)
+        if doc is None:
+            break
         doc_id = doc["_id"]
         new_retry_count = doc.get("retry_count", 0) + 1
+        exhausted = new_retry_count >= max_retries
 
         result = await post_record(
             http_client,
@@ -321,27 +356,19 @@ async def flush_job(
             token=output_token,
         )
 
-        update: dict[str, Any] = {
-            "retry_count": new_retry_count,
-            "last_attempt_at": now,
-        }
-
+        update: dict[str, Any] = {"last_attempt_at": now}
         if result.success:
             update["status"] = RecordStatus.POSTED
             update["last_error"] = None
-        elif result.error_class.value == "permanent":
-            update["status"] = RecordStatus.FAILED
-            update["last_error"] = result.error_message
-            if new_retry_count >= max_retries:
-                logger.warning(
-                    "record %s exhausted retries (%d), stays failed",
-                    doc_id, new_retry_count,
-                )
         else:
-            # Transient exhausted at this level — stays failed-like for next flush.
             update["last_error"] = result.error_message
-            if new_retry_count >= max_retries:
-                update["status"] = RecordStatus.FAILED
+            # Permanent errors fail at once; a transient one returns the
+            # record to the state it was claimed from, until retries run out.
+            permanent = result.error_class.value == "permanent"
+            update["status"] = (
+                RecordStatus.FAILED if permanent or exhausted else doc["status"]
+            )
+            if exhausted:
                 logger.warning(
                     "record %s exhausted retries (%d), stays failed",
                     doc_id, new_retry_count,
@@ -359,10 +386,13 @@ async def flush_job(
         "status": RecordStatus.POSTING,
         "last_attempt_at": {"$lt": stale_cutoff},
     }
+    claim_stale = {"$set": {"last_attempt_at": now}}
 
-    stale_cursor = db.processed_results.find(query_stale).limit(100)
     reclaimed = 0
-    async for doc in stale_cursor:
+    for _ in range(FLUSH_BATCH):
+        doc = await _claim_record(db, query_stale, claim_stale, seen)
+        if doc is None:
+            break
         doc_id = doc["_id"]
 
         result = await post_record(

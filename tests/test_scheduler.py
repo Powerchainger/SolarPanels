@@ -409,116 +409,108 @@ async def test_fetch_job_skips_auth_failed_account_without_fetching():
 # ---------------------------------------------------------------------------
 
 
-class FakeAsyncCursor:
-    """Mock async cursor that yields documents from a list."""
-
-    def __init__(self, docs: list[dict]) -> None:
-        self._docs = docs
-
-    def limit(self, _: int) -> "FakeAsyncCursor":
-        return self
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._docs:
-            raise StopAsyncIteration
-        return self._docs.pop(0)
+def _flush_db(*claimed: dict | None) -> MagicMock:
+    """Mock db whose find_one_and_update hands out `claimed` in order, then None."""
+    db = MagicMock()
+    db.processed_results.find_one_and_update = AsyncMock(side_effect=[*claimed, *[None] * 4])
+    db.processed_results.update_one = AsyncMock()
+    return db
 
 
-def _make_async_cursor(docs: list[dict]) -> FakeAsyncCursor:
-    """Create a mock cursor that yields documents asynchronously."""
-    return FakeAsyncCursor(list(docs))
-
-
-@respx.mock
-async def test_flush_job_retries_failed_records():
-    from scheduler.jobs import flush_job
-    from clients.base import TimedClient
-
-    old_doc = {
-        "_id": "doc-1",
+def _failed_doc(doc_id: str = "doc-1", retry_count: int = 1) -> dict:
+    return {
+        "_id": doc_id,
         "provider": "growatt",
         "account_id": "acc-1",
         "record": {"device_sn": "SN001", "ac_power_watts": 100.0},
         "status": RecordStatus.FAILED,
-        "retry_count": 1,
+        "retry_count": retry_count,
         "last_error": "HTTP 503",
         "last_attempt_at": datetime(2026, 7, 17, 11, 0, tzinfo=UTC),
     }
 
-    db = MagicMock()
-    # First find() call returns retriable docs, second returns stale docs (empty).
-    retriable_cursor = _make_async_cursor([old_doc])
-    stale_cursor = _make_async_cursor([])
-    db.processed_results.find = MagicMock(side_effect=[retriable_cursor, stale_cursor])
-    db.processed_results.update_one = AsyncMock()
 
-    respx.post("https://output.example.com/records").mock(
-        return_value=httpx.Response(200)
-    )
+async def _run_flush(db, **kwargs):
+    from scheduler.jobs import flush_job
+    from clients.base import TimedClient
 
     async with TimedClient() as http_client:
         await flush_job(
-            db, "https://output.example.com", "tok",
-            http_client=http_client,
-            max_retries=5,
+            db, "https://output.example.com", "tok", http_client=http_client, **kwargs
         )
 
+
+@respx.mock
+async def test_flush_job_retries_failed_records():
+    db = _flush_db(_failed_doc(retry_count=1))
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(200))
+
+    await _run_flush(db, max_retries=5)
+
+    # The claim moves the record to `posting` and counts the retry atomically.
+    claim_filter, claim_update = db.processed_results.find_one_and_update.call_args_list[0][0]
+    assert claim_filter["status"] == {"$in": [RecordStatus.PENDING, RecordStatus.FAILED]}
+    assert claim_filter["retry_count"] == {"$lt": 5}
+    assert claim_update["$set"]["status"] == RecordStatus.POSTING
+    assert claim_update["$inc"] == {"retry_count": 1}
+
     db.processed_results.update_one.assert_called_once()
-    call_args = db.processed_results.update_one.call_args[0]
-    update_dict = call_args[1]["$set"]
+    update_dict = db.processed_results.update_one.call_args[0][1]["$set"]
     assert update_dict["status"] == RecordStatus.POSTED
-    assert update_dict["retry_count"] == 2  # incremented from 1
 
 
 @respx.mock
 async def test_flush_job_exhausts_retries_stays_failed():
-    from scheduler.jobs import flush_job
-    from clients.base import TimedClient
+    db = _flush_db(_failed_doc("doc-exhausted", retry_count=4))  # 5th attempt
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(503))
 
-    old_doc = {
-        "_id": "doc-exhausted",
-        "provider": "growatt",
-        "account_id": "acc-1",
-        "record": {"device_sn": "SN001"},
-        "status": RecordStatus.FAILED,
-        "retry_count": 4,  # max_retries=5, so this is the 5th attempt
-        "last_error": "HTTP 503",
-        "last_attempt_at": datetime(2026, 7, 17, 11, 0, tzinfo=UTC),
-    }
+    await _run_flush(db, max_retries=5)
 
-    db = MagicMock()
-    retriable_cursor = _make_async_cursor([old_doc])
-    stale_cursor = _make_async_cursor([])
-    db.processed_results.find = MagicMock(side_effect=[retriable_cursor, stale_cursor])
-    db.processed_results.update_one = AsyncMock()
-
-    # Always return 503.
-    respx.post("https://output.example.com/records").mock(
-        return_value=httpx.Response(503)
-    )
-
-    async with TimedClient() as http_client:
-        await flush_job(
-            db, "https://output.example.com", "tok",
-            http_client=http_client,
-            max_retries=5,
-        )
-
-    call_args = db.processed_results.update_one.call_args[0]
-    update_dict = call_args[1]["$set"]
-    assert update_dict["retry_count"] == 5
-    # retry_count now >= max_retries → stays failed.
+    update_dict = db.processed_results.update_one.call_args[0][1]["$set"]
     assert update_dict["status"] == RecordStatus.FAILED
 
 
 @respx.mock
-async def test_flush_job_reclaims_stale_posting_records():
-    from scheduler.jobs import flush_job
-    from clients.base import TimedClient
+async def test_flush_job_transient_failure_returns_record_to_its_state():
+    """A claimed record must not stay `posting` after a transient failure."""
+    db = _flush_db(_failed_doc(retry_count=1))
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(503))
 
+    await _run_flush(db, max_retries=5)
+
+    update_dict = db.processed_results.update_one.call_args[0][1]["$set"]
+    assert update_dict["status"] == RecordStatus.FAILED
+    assert update_dict["last_error"] == "HTTP 503"
+
+
+@respx.mock
+async def test_flush_job_skips_records_already_handled_this_run():
+    """A record that fails again must not be retried twice in one run."""
+    db = _flush_db(_failed_doc("doc-1"), None, None)
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(503))
+
+    await _run_flush(db, max_retries=5)
+
+    second_filter = db.processed_results.find_one_and_update.call_args_list[1][0][0]
+    assert second_filter["_id"] == {"$nin": ["doc-1"]}
+
+
+@respx.mock
+async def test_flush_job_posts_nothing_when_nothing_can_be_claimed():
+    """Records claimed by another worker's flush are not ours to send."""
+    db = _flush_db()
+    route = respx.post("https://output.example.com/records").mock(
+        return_value=httpx.Response(200)
+    )
+
+    await _run_flush(db)
+
+    assert not route.called
+    db.processed_results.update_one.assert_not_called()
+
+
+@respx.mock
+async def test_flush_job_reclaims_stale_posting_records():
     stale_doc = {
         "_id": "stale-1",
         "provider": "growatt",
@@ -529,33 +521,22 @@ async def test_flush_job_reclaims_stale_posting_records():
         "last_error": None,
         "last_attempt_at": datetime.now(UTC) - timedelta(minutes=10),
     }
+    # Pass 1 claims nothing, pass 2 claims the stale record.
+    db = _flush_db(None, stale_doc)
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(200))
 
-    db = MagicMock()
-    # First find: no retriable. Second find: one stale record.
-    retriable_cursor = _make_async_cursor([])
-    stale_cursor = _make_async_cursor([stale_doc])
-    db.processed_results.find = MagicMock(side_effect=[retriable_cursor, stale_cursor])
-    db.processed_results.update_one = AsyncMock()
-
-    respx.post("https://output.example.com/records").mock(
-        return_value=httpx.Response(200)
-    )
-
-    async with TimedClient() as http_client:
-        await flush_job(
-            db, "https://output.example.com", "tok",
-            http_client=http_client,
-            stale_seconds=300,  # 5 min — doc is 10 min old, so it's stale
-        )
+    await _run_flush(db, stale_seconds=300)
 
     db.processed_results.update_one.assert_called_once()
-    call_args = db.processed_results.update_one.call_args[0]
-    update_dict = call_args[1]["$set"]
+    update_dict = db.processed_results.update_one.call_args[0][1]["$set"]
     assert update_dict["status"] == RecordStatus.POSTED
-    # Dates, not ISO strings: Mongo compares a date with an ISO string by
-    # BSON type, not by time, so the stale query must use dates.
-    stale_query = db.processed_results.find.call_args_list[1][0][0]
-    assert isinstance(stale_query["last_attempt_at"]["$lt"], datetime)
+    # The claim refreshes last_attempt_at, so another worker's stale query no
+    # longer matches. Dates, not ISO strings: Mongo compares a date with an
+    # ISO string by BSON type, not by time, so the stale query must use dates.
+    stale_filter, stale_claim = db.processed_results.find_one_and_update.call_args_list[1][0]
+    assert stale_filter["status"] == RecordStatus.POSTING
+    assert isinstance(stale_filter["last_attempt_at"]["$lt"], datetime)
+    assert isinstance(stale_claim["$set"]["last_attempt_at"], datetime)
     assert isinstance(update_dict["last_attempt_at"], datetime)
 
 
