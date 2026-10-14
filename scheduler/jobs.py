@@ -1,10 +1,12 @@
 """APScheduler job definitions and scheduler bootstrap.
 
-Two job types:
+Three job types:
   1. **Fetch job** — one per enabled (provider, account_id).  Fetches raw
      data via the provider registry, runs the transform, writes
      RawResponse + ProcessedRecord docs, POSTs records, updates status.
   2. **Flush job** — picks up pending/failed/stale records and retries them.
+  3. **Sync job** — re-claims leases and adds/removes/reschedules fetch jobs
+     to match, so account changes apply without a restart.
 
 Scheduler config (IMPL.md Step 9):
   - AsyncIOScheduler
@@ -39,6 +41,7 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 from clients.base import AuthFailedError, TimedClient
 from clients.output import post_record
+from leases import claim_leases
 from db.models import (
     ApiConfig,
     ProcessedRecord,
@@ -53,6 +56,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_FLUSH_INTERVAL_SECONDS = 300
 DEFAULT_STALE_THRESHOLD_SECONDS = 300  # 5 minutes
+
+# How often a worker re-claims leases: picks up new or re-enabled accounts,
+# changed intervals, and accounts a dead worker left behind.
+DEFAULT_SYNC_INTERVAL_SECONDS = 60
 
 # Consecutive auth rejections before an account is frozen. One glitch (a
 # proxy, a briefly wrong response) must not stop collection for good.
@@ -485,6 +492,10 @@ class RunningJobs:
         return self._idle.is_set()
 
 
+def _fetch_job_id(acct: ApiConfig) -> str:
+    return f"fetch::{acct.provider}::{acct.account_id}"
+
+
 def add_account_jobs(
     scheduler: AsyncIOScheduler,
     accounts: list[ApiConfig],
@@ -504,7 +515,7 @@ def add_account_jobs(
     """
     now = datetime.now(UTC)
     for acct in accounts:
-        job_id = f"fetch::{acct.provider}::{acct.account_id}"
+        job_id = _fetch_job_id(acct)
         first_run = first_run_at(acct, now)
 
         scheduler.add_job(
@@ -569,3 +580,89 @@ def add_flush_job(
     logger.info(
         "registered flush job (interval=%ds, jitter=%.1fs)", flush_interval, jitter,
     )
+
+
+# ---------------------------------------------------------------------------
+# Sync job
+# ---------------------------------------------------------------------------
+
+
+async def sync_accounts_job(
+    scheduler: AsyncIOScheduler,
+    claimed: list[ApiConfig],
+    db: AsyncDatabase,
+    output_base_url: str,
+    output_token: str,
+    http_client: TimedClient,
+    *,
+    worker_id: str,
+    ttl_multiplier: int,
+) -> None:
+    """Bring this worker's fetch jobs in line with the leases it can hold.
+
+    Claims every free enabled account (claim_leases also returns the ones
+    this worker already holds), then:
+      - adds a fetch job for each newly held account,
+      - reschedules a job whose account interval changed,
+      - removes fetch jobs for accounts no longer held (deleted, disabled,
+        or taken over by another worker).
+
+    `claimed` is replaced in place: the heartbeat renews and shutdown
+    releases exactly what is in it.
+    """
+    held = await claim_leases(db, worker_id, ttl_multiplier=ttl_multiplier)
+    held_ids = {_fetch_job_id(a): a for a in held}
+
+    for job_id, acct in held_ids.items():
+        job = scheduler.get_job(job_id)
+        if job is None:
+            add_account_jobs(
+                scheduler, [acct], db, output_base_url, output_token, http_client,
+                worker_id=worker_id,
+            )
+        elif job.trigger.interval != timedelta(seconds=acct.interval_seconds):
+            scheduler.reschedule_job(
+                job_id, trigger=IntervalTrigger(seconds=acct.interval_seconds)
+            )
+            logger.info("rescheduled %s (interval=%ds)", job_id, acct.interval_seconds)
+
+    for job in scheduler.get_jobs():
+        if job.id.startswith("fetch::") and job.id not in held_ids:
+            scheduler.remove_job(job.id)
+            logger.info("removed %s — account deleted, disabled or held elsewhere", job.id)
+
+    claimed[:] = held
+
+
+def add_sync_job(
+    scheduler: AsyncIOScheduler,
+    claimed: list[ApiConfig],
+    db: AsyncDatabase,
+    output_base_url: str,
+    output_token: str,
+    http_client: TimedClient,
+    *,
+    worker_id: str,
+    ttl_multiplier: int,
+    sync_interval: int = DEFAULT_SYNC_INTERVAL_SECONDS,
+) -> None:
+    """Add the periodic lease re-claim job (see `sync_accounts_job`)."""
+    scheduler.add_job(
+        sync_accounts_job,
+        trigger=IntervalTrigger(seconds=sync_interval),
+        id="sync",
+        name="sync",
+        kwargs={
+            "scheduler": scheduler,
+            "claimed": claimed,
+            "db": db,
+            "output_base_url": output_base_url,
+            "output_token": output_token,
+            "http_client": http_client,
+            "worker_id": worker_id,
+            "ttl_multiplier": ttl_multiplier,
+        },
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("registered sync job (interval=%ds)", sync_interval)

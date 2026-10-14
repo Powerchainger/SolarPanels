@@ -69,6 +69,7 @@ def _patched_main(mock_settings, mock_account):
         patch("main.build_scheduler", return_value=mock_scheduler) as build,
         patch("main.add_account_jobs") as add_jobs,
         patch("main.add_flush_job") as add_flush,
+        patch("main.add_sync_job") as add_sync,
         patch("main.heartbeat", new_callable=AsyncMock),
         patch("main.release_lease", new_callable=AsyncMock) as release,
         patch("main.shutdown_gracefully", new_callable=AsyncMock) as shutdown,
@@ -78,7 +79,8 @@ def _patched_main(mock_settings, mock_account):
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
         yield MagicMock(
             handlers=handlers, scheduler=mock_scheduler, claim=claim, build=build, probe=probe,
-            add_jobs=add_jobs, add_flush=add_flush, release=release, shutdown=shutdown,
+            add_jobs=add_jobs, add_flush=add_flush, add_sync=add_sync,
+            release=release, shutdown=shutdown,
         )
 
 
@@ -92,6 +94,7 @@ async def test_main_claims_leases(mock_settings, mock_account):
     m.build.assert_called_once_with([mock_account])
     m.add_jobs.assert_called_once()
     m.add_flush.assert_called_once()
+    m.add_sync.assert_called_once()
     m.scheduler.start.assert_called_once()
 
 
@@ -111,14 +114,16 @@ async def test_main_quiets_httpx_request_logging(mock_settings, mock_account):
 
 
 @pytest.mark.asyncio
-async def test_main_exits_when_no_accounts(mock_settings, mock_account):
-    """_main exits early if no accounts are claimed."""
+async def test_main_keeps_running_when_no_accounts(mock_settings, mock_account):
+    """With nothing to claim yet, _main stays up and lets the sync job wait for accounts."""
     with _patched_main(mock_settings, mock_account) as m:
         m.claim.return_value = []
 
         await _main()
 
-        m.build.assert_not_called()
+        m.add_sync.assert_called_once()
+        assert m.add_sync.call_args[0][1] == []  # the list the sync job fills
+        m.scheduler.start.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -129,7 +129,8 @@ async def claim_leases(
             except Exception:
                 logger.exception("failed to parse claimed api_config %s", doc_id)
 
-    logger.info("worker %s claimed %d account(s)", worker_id, len(claimed))
+    # Debug: the sync job calls this every minute; new claims log above.
+    logger.debug("worker %s holds %d account(s)", worker_id, len(claimed))
     return claimed
 
 

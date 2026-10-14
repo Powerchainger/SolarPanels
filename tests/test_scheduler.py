@@ -676,3 +676,95 @@ def test_add_account_jobs_uses_first_run_at():
     )
     next_run = scheduler.add_job.call_args.kwargs["next_run_time"]
     assert next_run == last + timedelta(seconds=360)
+
+
+# ---------------------------------------------------------------------------
+# sync_accounts_job
+# ---------------------------------------------------------------------------
+
+
+async def _sync(sched, claimed, held):
+    from scheduler.jobs import sync_accounts_job
+
+    with patch("scheduler.jobs.claim_leases", new_callable=AsyncMock, return_value=held):
+        await sync_accounts_job(
+            sched, claimed, MagicMock(), "https://x.com", "", MagicMock(),
+            worker_id="w1", ttl_multiplier=2,
+        )
+
+
+def _fetch_job_ids(sched) -> set[str]:
+    return {j.id for j in sched.get_jobs() if j.id.startswith("fetch::")}
+
+
+async def test_sync_adds_newly_claimed_account():
+    """An account added after start is scheduled without a restart."""
+    from scheduler.jobs import build_scheduler
+
+    sched = build_scheduler([])
+    sched.start(paused=True)
+    try:
+        claimed: list[ApiConfig] = []
+        new = _make_growatt_config("acc-new", 600)
+        await _sync(sched, claimed, [new])
+
+        assert _fetch_job_ids(sched) == {"fetch::growatt::acc-new"}
+        assert claimed == [new]
+    finally:
+        sched.shutdown(wait=False)
+
+
+async def test_sync_removes_jobs_for_accounts_no_longer_held():
+    """Deleted, disabled or taken-over accounts lose their fetch job."""
+    from scheduler.jobs import build_scheduler, add_account_jobs, add_flush_job
+
+    sched = build_scheduler([])
+    sched.start(paused=True)
+    try:
+        keep, gone = _make_growatt_config("keep"), _make_growatt_config("gone")
+        add_account_jobs(sched, [keep, gone], MagicMock(), "https://x.com", "", MagicMock())
+        add_flush_job(sched, MagicMock(), "https://x.com", "", MagicMock())
+        claimed = [keep, gone]
+
+        await _sync(sched, claimed, [keep])
+
+        assert _fetch_job_ids(sched) == {"fetch::growatt::keep"}
+        assert sched.get_job("flush") is not None  # only fetch jobs are touched
+        assert claimed == [keep]
+    finally:
+        sched.shutdown(wait=False)
+
+
+async def test_sync_reschedules_changed_interval():
+    from scheduler.jobs import build_scheduler, add_account_jobs
+
+    sched = build_scheduler([])
+    sched.start(paused=True)
+    try:
+        old = _make_growatt_config("acc-1", 300)
+        add_account_jobs(sched, [old], MagicMock(), "https://x.com", "", MagicMock())
+
+        await _sync(sched, [old], [_make_growatt_config("acc-1", 900)])
+
+        job = sched.get_job("fetch::growatt::acc-1")
+        assert job.trigger.interval == timedelta(seconds=900)
+    finally:
+        sched.shutdown(wait=False)
+
+
+async def test_sync_keeps_unchanged_job():
+    """A held account with the same interval keeps its job and next run time."""
+    from scheduler.jobs import build_scheduler, add_account_jobs
+
+    sched = build_scheduler([])
+    sched.start(paused=True)
+    try:
+        acct = _make_growatt_config("acc-1", 300)
+        add_account_jobs(sched, [acct], MagicMock(), "https://x.com", "", MagicMock())
+        before = sched.get_job("fetch::growatt::acc-1").next_run_time
+
+        await _sync(sched, [acct], [_make_growatt_config("acc-1", 300)])
+
+        assert sched.get_job("fetch::growatt::acc-1").next_run_time == before
+    finally:
+        sched.shutdown(wait=False)

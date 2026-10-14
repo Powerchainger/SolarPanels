@@ -4,7 +4,8 @@ Boot sequence:
   1. Load config from environment.
   2. Connect to MongoDB, ensure indexes, probe the output API (exits
      before any lease is claimed if it is unreachable).
-  3. Claim leases for this WORKER_ID.
+  3. Claim leases for this WORKER_ID (re-checked every minute by the
+     sync job, so accounts added later are picked up without a restart).
   4. Start heartbeat renewal coroutine.
   5. Set default executor for growattServer.to_thread calls.
   6. Build scheduler from claimed accounts.
@@ -32,7 +33,13 @@ import httpx
 from config import Settings
 from db.mongo import get_db, init_indexes
 from leases import claim_leases, heartbeat, release_lease
-from scheduler.jobs import RunningJobs, add_account_jobs, add_flush_job, build_scheduler
+from scheduler.jobs import (
+    RunningJobs,
+    add_account_jobs,
+    add_flush_job,
+    add_sync_job,
+    build_scheduler,
+)
 
 logger = logging.getLogger("solar-scraper")
 
@@ -80,15 +87,15 @@ async def _main() -> None:
         ttl_multiplier=settings.lease_ttl_multiplier,
     )
 
-    if not claimed:
-        logger.warning("no accounts claimed — nothing to do, exiting")
-        return
-
-    logger.info(
-        "claimed %d account(s): %s",
-        len(claimed),
-        ", ".join(f"{a.provider}/{a.account_id}" for a in claimed),
-    )
+    if claimed:
+        logger.info(
+            "claimed %d account(s): %s",
+            len(claimed),
+            ", ".join(f"{a.provider}/{a.account_id}" for a in claimed),
+        )
+    else:
+        # Stay up: the sync job claims accounts as they are added or freed.
+        logger.warning("no accounts claimed yet — checking again every minute")
 
     # --- Set default executor for to_thread calls -----------------------
     loop = asyncio.get_running_loop()
@@ -121,6 +128,17 @@ async def _main() -> None:
         output_base_url=output_base_url,
         output_token=output_token,
         http_client=http_client,
+    )
+
+    add_sync_job(
+        scheduler,
+        claimed,
+        db=db,
+        output_base_url=output_base_url,
+        output_token=output_token,
+        http_client=http_client,
+        worker_id=settings.worker_id,
+        ttl_multiplier=settings.lease_ttl_multiplier,
     )
 
     running_jobs = RunningJobs(scheduler)
@@ -169,7 +187,8 @@ async def _main() -> None:
     await shutdown_requested.wait()
 
     async def release_all() -> None:
-        # `claimed` is pruned in place by the heartbeat when a lease is lost.
+        # `claimed` is kept current in place: pruned by the heartbeat when a
+        # lease is lost, replaced by the sync job (paused by now).
         results = await asyncio.gather(
             *(
                 release_lease(db, acct.provider, acct.account_id, settings.worker_id)
