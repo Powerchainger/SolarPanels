@@ -21,6 +21,7 @@ from typing import Any
 
 from growattServer import OpenApiV1
 from growattServer.exceptions import GrowattV1ApiError
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,31 @@ logger = logging.getLogger(__name__)
 # property of the fetch code, not a per-account setting. Other device types
 # (dataloggers, ...) are dropped by `list_devices`.
 GROWATT_MIN_DEVICE_TYPE = 7
+
+# (connect, read) seconds, as DEFAULT_TIMEOUT in clients/base.py. The SDK
+# passes no timeout, so without one a stalled connection blocks the worker
+# thread forever and APScheduler (max_instances=1) skips every later run for
+# that account.
+GROWATT_TIMEOUT = (10.0, 30.0)
+
+
+class _TimeoutAdapter(HTTPAdapter):
+    """Applies GROWATT_TIMEOUT to every request that sets none."""
+
+    def send(self, request, **kwargs):  # type: ignore[override]
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = GROWATT_TIMEOUT
+        return super().send(request, **kwargs)
+
+
+def _api(api_token: str) -> OpenApiV1:
+    """A fresh SDK client whose requests time out."""
+    api = OpenApiV1(api_token)
+    adapter = _TimeoutAdapter()
+    api.session.mount("https://", adapter)
+    api.session.mount("http://", adapter)
+    return api
+
 
 # Type alias for clarity in callers.
 GrowattPlant = dict[str, Any]
@@ -43,7 +69,7 @@ async def list_plants(api_token: str) -> list[GrowattPlant]:
     """
 
     def _call() -> list[GrowattPlant]:
-        api = OpenApiV1(api_token)
+        api = _api(api_token)
         try:
             resp = api.plant_list()
         except GrowattV1ApiError as e:
@@ -74,7 +100,7 @@ async def list_devices(
     """
 
     def _call() -> list[GrowattDevice]:
-        api = OpenApiV1(api_token)
+        api = _api(api_token)
         try:
             resp = api.device_list(plant_id)
         except GrowattV1ApiError as e:
@@ -102,7 +128,7 @@ async def device_energy(
     """
 
     def _call() -> GrowattEnergy:
-        api = OpenApiV1(api_token)
+        api = _api(api_token)
         try:
             resp = api.min_energy(device_sn=device_sn)
         except GrowattV1ApiError as e:

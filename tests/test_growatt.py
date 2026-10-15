@@ -246,3 +246,32 @@ async def test_growatt_cache_write_is_conditioned_on_seeded_at():
 
     filt = db.api_configs.update_one.call_args[0][0]
     assert filt == {"_id": "growatt::g", "seeded_at": seeded}
+
+
+# ---------------------------------------------------------------------------
+# Timeout
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_requests_time_out_on_a_stalled_server():
+    """The SDK sets no timeout; a server that never answers must not hang us.
+
+    Local socket that accepts and never replies — no network, no real API.
+    """
+    import socket
+
+    import requests
+
+    from clients.growatt import _api
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    port = server.getsockname()[1]
+    try:
+        with patch("clients.growatt.GROWATT_TIMEOUT", (1.0, 0.2)):
+            api = _api("fake-token")
+            with pytest.raises(requests.exceptions.ReadTimeout):
+                api.session.get(f"http://127.0.0.1:{port}/v1/plant/list")
+    finally:
+        server.close()
