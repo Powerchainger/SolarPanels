@@ -35,6 +35,12 @@ from pydantic import (
 
 from crypto import decrypt_str, encrypt_str, is_encrypted
 
+# Shortest poll interval an account may have. Zero crashed the scheduler
+# (stagger_seconds takes a modulo by it), and below ~15 s the lease TTL
+# (interval × LEASE_TTL_MULTIPLIER) drops under the 30 s heartbeat, so
+# leases would expire between renewals.
+MIN_INTERVAL_SECONDS = 60
+
 
 # ---------------------------------------------------------------------------
 # Shared primitives
@@ -187,7 +193,7 @@ class ApiConfig(BaseModel):
     provider: Literal["enphase", "growatt"]
     account_id: str
     enabled: bool = True
-    interval_seconds: int
+    interval_seconds: int = Field(ge=MIN_INTERVAL_SECONDS)
     credentials: Annotated[
         EnphaseCredentials | GrowattCredentials,
         Field(discriminator="provider"),

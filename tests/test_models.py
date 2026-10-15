@@ -197,6 +197,17 @@ def test_api_config_missing_interval_seconds():
         )
 
 
+@pytest.mark.parametrize("interval", [0, -1, 59])
+def test_api_config_rejects_too_short_interval(interval):
+    """Zero crashed stagger_seconds (modulo by zero) at boot and in every sync."""
+    with pytest.raises(ValidationError):
+        _growatt_config(interval_seconds=interval)
+
+
+def test_api_config_accepts_minimum_interval():
+    assert _growatt_config(interval_seconds=60).interval_seconds == 60
+
+
 def test_api_config_missing_credentials():
     with pytest.raises(ValidationError):
         ApiConfig(provider="growatt", account_id="x", interval_seconds=300)

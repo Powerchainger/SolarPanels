@@ -29,7 +29,12 @@ from dotenv import load_dotenv
 from pymongo.asynchronous.mongo_client import AsyncMongoClient
 
 from crypto import SECRET_FIELDS, decrypt_str, encrypt_str, is_encrypted
-from db.models import ApiConfig, EnphaseCredentials, GrowattCredentials
+from db.models import (
+    MIN_INTERVAL_SECONDS,
+    ApiConfig,
+    EnphaseCredentials,
+    GrowattCredentials,
+)
 
 load_dotenv()  # uv does not auto-load .env — without this, MONGO_URI falls
 # back to unauthenticated localhost once Mongo requires auth.
@@ -87,7 +92,9 @@ def enphase_set(
         help="Read all credential values from a JSON file instead of flags/prompts",
         exists=True,
     ),
-    interval: int = typer.Option(3600, "--interval", help="Poll interval in seconds"),
+    interval: int = typer.Option(
+        3600, "--interval", min=MIN_INTERVAL_SECONDS, help="Poll interval in seconds"
+    ),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
 ) -> None:
     """Seed an EnPhase account.
@@ -173,7 +180,9 @@ def growatt_set(
         help="Read values from a JSON file: {\"api_token\": \"...\"}",
         exists=True,
     ),
-    interval: int = typer.Option(600, "--interval", help="Poll interval in seconds"),
+    interval: int = typer.Option(
+        600, "--interval", min=MIN_INTERVAL_SECONDS, help="Poll interval in seconds"
+    ),
     enabled: bool = typer.Option(True, "--enabled/--disabled"),
 ) -> None:
     """Create or update a Growatt account with a static API token.
