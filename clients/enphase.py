@@ -309,8 +309,31 @@ async def fetch_cycle(
     # 1. Token refresh.
     refreshed = False
     if should_refresh(creds.expires_at):
-        creds = await refresh_access_token(client, creds, db, account_id, seeded_at=seeded_at)
-        refreshed = True
+        try:
+            creds = await refresh_access_token(client, creds, db, account_id, seeded_at=seeded_at)
+            refreshed = True
+        except AuthFailedError:
+            # Another process (standby worker, dev.py test-enphase) may have
+            # refreshed after this cycle read the account, and EnPhase may
+            # have rotated the refresh token with it, so the one used here is
+            # dead while the stored one works. Only an unchanged stored
+            # refresh token means the authorization itself is gone.
+            stored = await _reload_config(db, account_id)
+            if stored is None:
+                raise
+            assert isinstance(stored.credentials, EnphaseCredentials)
+            if stored.credentials.refresh_token == creds.refresh_token:
+                raise
+            logger.info(
+                "token refresh for %s rejected; using credentials stored by another process",
+                account_id,
+            )
+            creds, seeded_at = stored.credentials, stored.seeded_at
+            if should_refresh(creds.expires_at):
+                creds = await refresh_access_token(
+                    client, creds, db, account_id, seeded_at=seeded_at
+                )
+                refreshed = True
 
     async def attempt(c: EnphaseCredentials, s: datetime | None) -> Any:
         # 2. Site ID, then 3. Fetch.

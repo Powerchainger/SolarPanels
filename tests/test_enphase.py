@@ -721,3 +721,80 @@ async def test_fetch_cycle_data_401_after_reseed_uses_new_seeded_at():
 
     filt = db.api_configs.update_one.call_args[0][0]
     assert filt["seeded_at"] == reseeded
+
+
+@respx.mock
+async def test_fetch_cycle_refresh_401_uses_refresh_token_rotated_elsewhere():
+    """Another process refreshed and rotated the refresh token after this cycle read it."""
+    cached = SiteCache(site_id=1)
+    stored = _make_config(
+        credentials=_make_creds(access_token="fresh-access", refresh_token="rotated-refresh"),
+        site_cache=cached,
+    )
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(stored))
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(401))
+    inverters = respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)
+    )
+    config = _make_config(
+        credentials=_make_creds(expires_at=datetime.now(UTC) + timedelta(hours=1)),
+        site_cache=cached,
+    )
+
+    async with TimedClient() as client:
+        result = await fetch_cycle(db, config, client)
+
+    assert result[0][1] == SAMPLE_INVERTER_SUMMARY
+    assert token.call_count == 1  # the rejected one; the stored token is still valid
+    assert inverters.calls.last.request.headers["Authorization"] == "Bearer fresh-access"
+
+
+@respx.mock
+async def test_fetch_cycle_refresh_401_refreshes_rotated_token_near_expiry():
+    cached = SiteCache(site_id=1)
+    reseeded = datetime(2026, 10, 7, 9, 0)
+    stored = _make_config(
+        credentials=_make_creds(
+            refresh_token="rotated-refresh",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+        site_cache=cached, seeded_at=reseeded,
+    )
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(stored))
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(
+        side_effect=[httpx.Response(401), _refresh_ok()]
+    )
+    inverters = respx.get(f"{BASE_URL}/api/v4/systems/inverters_summary_by_envoy_or_site").mock(
+        return_value=httpx.Response(200, json=SAMPLE_INVERTER_SUMMARY)
+    )
+    config = _make_config(
+        credentials=_make_creds(expires_at=datetime.now(UTC) + timedelta(hours=1)),
+        site_cache=cached,
+    )
+
+    async with TimedClient() as client:
+        await fetch_cycle(db, config, client)
+
+    assert token.call_count == 2
+    assert "refresh_token=rotated-refresh" in token.calls.last.request.content.decode()
+    assert inverters.calls.last.request.headers["Authorization"] == "Bearer new-access-token"
+    # The write is conditioned on the seeded_at read with the stored credentials.
+    assert db.api_configs.update_one.call_args[0][0]["seeded_at"] == reseeded
+
+
+@respx.mock
+async def test_fetch_cycle_refresh_401_with_unchanged_stored_token_is_auth_failure():
+    config = _make_config(
+        credentials=_make_creds(expires_at=datetime.now(UTC) + timedelta(hours=1)),
+    )
+    db = _mock_db()
+    db.api_configs.find_one = AsyncMock(return_value=_stored_doc(config))
+    token = respx.post(f"{BASE_URL}/oauth/token").mock(return_value=httpx.Response(401))
+
+    async with TimedClient() as client:
+        with pytest.raises(AuthFailedError):
+            await fetch_cycle(db, config, client)
+
+    assert token.call_count == 1  # no retry with the same dead token
