@@ -58,8 +58,13 @@ from crypto import validate_key
 class Settings(BaseSettings):
     # extra="ignore": .env also carries compose/mongosh-only keys
     # (MONGO_ROOT_*, MONGO_APP_*) that are not app settings.
+    # hide_input_in_errors: a validation error is printed before logging is
+    # set up, and pydantic would echo the offending value (or, for a missing
+    # field, every other setting) — ENCRYPTION_KEY and the credentialed
+    # MONGO_URI would land in the container logs.
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", extra="ignore",
+        hide_input_in_errors=True,
     )
 
     mongo_uri: str

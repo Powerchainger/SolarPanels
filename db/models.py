@@ -144,6 +144,8 @@ class EnphaseCredentials(BaseModel):
     the service keeps them up-to-date in MongoDB automatically.
     """
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     provider: Literal["enphase"] = "enphase"
     client_id: str
     client_secret: EncryptedSecret
@@ -158,6 +160,8 @@ class EnphaseCredentials(BaseModel):
 
 class GrowattCredentials(BaseModel):
     """Static API token obtained from the ShinePhone app."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     provider: Literal["growatt"] = "growatt"
     api_token: EncryptedSecret
@@ -176,7 +180,9 @@ class ApiConfig(BaseModel):
     with what the client code expects.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    # Validation errors reach logs (leases.py logs an unparsable account);
+    # never let them echo credential values.
+    model_config = ConfigDict(populate_by_name=True, hide_input_in_errors=True)
 
     provider: Literal["enphase", "growatt"]
     account_id: str

@@ -40,3 +40,21 @@ def test_posted_ttl_days_rejects_invalid(env, value):
     env.setenv("POSTED_TTL_DAYS", value)
     with pytest.raises(ValidationError):
         _settings()
+
+
+def test_invalid_encryption_key_is_not_echoed_in_the_error(env):
+    """The error is printed before logging is set up and ends up in podman logs."""
+    env.setenv("ENCRYPTION_KEY", "not-a-real-key-SENTINEL")
+    with pytest.raises(ValidationError) as exc_info:
+        _settings()
+    assert "SENTINEL" not in str(exc_info.value)
+
+
+def test_missing_setting_does_not_echo_the_other_settings(env):
+    env.setenv("ENCRYPTION_KEY", "not-a-real-key-SENTINEL")
+    env.setenv("MONGO_URI", "mongodb://user:PASSWORD@host")
+    env.delenv("WORKER_ID")
+    with pytest.raises(ValidationError) as exc_info:
+        _settings()
+    assert "SENTINEL" not in str(exc_info.value)
+    assert "PASSWORD" not in str(exc_info.value)

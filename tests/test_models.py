@@ -368,3 +368,18 @@ def test_encryption_key_environment_wins_over_dotenv(tmp_path, monkeypatch):
         assert Fernet(env_key.encode()).decrypt(token.encode()) == b"secret"
     finally:
         crypto._fernet.cache_clear()
+
+
+def test_validation_errors_do_not_echo_credentials():
+    """leases.py logs an unparsable account; the log must not carry secrets."""
+    with pytest.raises(ValidationError) as exc_info:
+        ApiConfig(
+            provider="enphase",
+            account_id="x",
+            interval_seconds=0,
+            credentials={"provider": "enphase", "client_secret": "SENTINEL"},
+        )
+    assert "SENTINEL" not in str(exc_info.value)
+    with pytest.raises(ValidationError) as exc_info:
+        EnphaseCredentials(client_secret="SENTINEL")
+    assert "SENTINEL" not in str(exc_info.value)
