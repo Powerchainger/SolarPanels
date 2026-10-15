@@ -19,6 +19,7 @@ nav = [
   ] },
   { "Technical reference" = [
     { "Architecture" = "technical/architecture.md" },
+    { "Adding a provider" = "technical/adding-a-provider.md" },
   ] },
 ]
 

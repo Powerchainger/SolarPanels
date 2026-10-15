@@ -78,6 +78,14 @@ levels of retry:
   records stuck in `posting` for more than 5 minutes (left behind by a
   crash). Up to 100 of each per run.
 
+Every send is preceded by an atomic claim (`find_one_and_update`) that sets
+`status: posting` and stamps `last_attempt_at` with the time of the claim.
+The outcome is only written while that stamp is still on the record, so
+when a slow send is reclaimed by another worker, the first one cannot
+overwrite the second one's result. `fetch_job` claims its own new records
+the same way. Delivery is at-least-once: a crash between a successful POST
+and the status write leads to a resend.
+
 ## Providers
 
 | | EnPhase | Growatt |
@@ -86,15 +94,19 @@ levels of retry:
 | Calls per cycle | 1 (inverter summary), plus `/systems` once, plus token refresh ~daily | 1 per inverter, plus plant and device list once per 24 h |
 | Cache | `site_cache` on the account (until re-seed) | `growatt_cache` on the account (24 h) |
 | Records per cycle | 1 per installation | 1 per inverter |
-| HTTP | httpx (`TimedClient`) | `growattServer` SDK in a thread (`asyncio.to_thread`) |
+| HTTP | httpx (`TimedClient`) | `growattServer` SDK in a thread (`asyncio.to_thread`), with a (10 s, 30 s) connect/read timeout added (`GROWATT_TIMEOUT`) |
 
 EnPhase auth failures (HTTP 401) increment `consecutive_auth_failures`; at
-3 the account is frozen with `auth_failed=True` until re-seeded. A 401 on a
-data call first triggers one forced refresh, in case another process
-rotated the token.
+3 the account is frozen with `auth_failed=True` until re-seeded. Because
+another process may have refreshed (and rotated) the token, a 401 is not
+taken at face value:
 
-Adding a provider means adding a credentials model (`db/models.py`), a
-client, a transform function, and an entry in `providers.REGISTRY`.
+- a 401 on a data call reloads the stored credentials and retries with
+  them, refreshing once if they are unchanged;
+- a 401 on the refresh itself reloads the stored credentials and retries
+  only if the stored refresh token differs from the rejected one.
+
+To add a provider, see [Adding a provider](adding-a-provider.md).
 
 ## Data model
 
@@ -136,14 +148,14 @@ OCI images, which do not support `HEALTHCHECK`.
 ## Development
 
 ```bash
-uv sync --all-extras
+uv sync --all-extras           # pytest and respx are in the `dev` extra
 uv run pytest tests/
 uv run python dev.py serve     # local echo server that prints received records
 uv run --group docs zensical serve   # preview these docs
 ```
 
-Run the tests with `uv run --all-extras`: a plain `uv run` syncs the
-environment without the test extras and removes pytest.
+`uv sync` without `--all-extras` removes the test tools again; `uv run`
+leaves installed extras alone.
 
 The `flake.nix` dev shell is optional; uv alone is enough. Design history
 and decisions are in `PLAN.md` and `IMPL.md`.

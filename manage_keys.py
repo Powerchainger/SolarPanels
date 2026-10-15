@@ -375,7 +375,7 @@ def _plan_upsert(existing: dict | None, cfg: ApiConfig) -> dict:
     update: dict = {"$set": controlled}
     if existing is None:
         update["$setOnInsert"] = {k: v for k, v in doc.items() if k not in controlled}
-    elif _cache_stale(existing, cfg):
+    elif cfg.provider in _CACHE_FIELD and _cache_stale(existing, cfg):
         update["$unset"] = {_CACHE_FIELD[cfg.provider]: ""}
     return update
 
