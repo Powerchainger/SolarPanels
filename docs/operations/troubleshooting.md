@@ -57,7 +57,7 @@ Possible causes:
   `growatt-set --interval 600`.
 - The same token is also used by other software (ShinePhone, Home
   Assistant) at the same time.
-- `dev.py test-growatt` was run while the service was also polling.
+- `dev.py test-growatt` was run repeatedly for the account.
 
 Occasional `10012` errors are harmless: the next poll usually works.
 
@@ -96,7 +96,9 @@ few rounds.
 - **Disabled?** Check `enabled=` in `manage_keys.py list`.
 - **`last_success=never` and a growing `failures` count?** The provider call
   fails every time. Find the reason with `podman compose logs app | grep
-  <account-id>`, or run `dev.py test-growatt` / `test-enphase` for that account.
+  <account-id>`. `dev.py test-growatt` / `test-enphase` shows the error
+  directly, but only runs while no worker holds the account (see
+  [Testing an account](accounts.md#testing-an-account)).
 
 ## `InvalidToken` in the logs
 

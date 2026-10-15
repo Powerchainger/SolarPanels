@@ -149,30 +149,37 @@ Use these steps for a new account, and also to recover an account marked
     }
     ```
 
-5. **Store the account:**
+5. **Store the account**, disabled for now so that you can test it before
+    the service starts polling it:
 
     ```bash
-    uv run python manage_keys.py enphase-set --account-id office --from-file creds.json
+    uv run python manage_keys.py enphase-set --account-id office --from-file creds.json --disabled
     ```
 
     Add `--interval <seconds>` to change the default poll interval of 3600
     seconds (1 hour). EnPhase API plans limit the number of calls per month,
     so check your plan's quota before polling more often.
 
-6. **Delete the secret files:**
-
-    ```bash
-    rm EnPhase/access_gen.json EnPhase/credentials.json creds.json
-    ```
-
-7. **Test it** with one poll against a local test receiver:
+6. **Test it** with one poll (see [Testing an account](#testing-an-account)):
 
     ```bash
     uv run python dev.py test-enphase --account-id office
     ```
 
-    It should end with `processed_results: 1 new`, `echo POSTs received: 1`
-    and `auth_failed=False`.
+    It should report `records : 1` and end without an error.
+
+7. **Enable it** by storing it again without `--disabled` (keep any
+    `--interval` you passed):
+
+    ```bash
+    uv run python manage_keys.py enphase-set --account-id office --from-file creds.json
+    ```
+
+8. **Delete the secret files:**
+
+    ```bash
+    rm EnPhase/access_gen.json EnPhase/credentials.json creds.json
+    ```
 
 From now on the service keeps the tokens valid by itself: the access token
 lasts about 24 hours and is refreshed automatically shortly before it
@@ -182,7 +189,10 @@ expires. As long as the service runs regularly, no further action is needed.
     If the service is stopped for a long time, or the system owner revokes
     access in their EnPhase account, the stored authorization stops working.
     The service then pauses the account after 3 rejected attempts in a row
-    and shows it as `AUTH FAILED`. Repeat the steps above to fix it.
+    and shows it as `AUTH FAILED`. Repeat the steps above to fix it; for an
+    account the service already holds, store it enabled straight away and
+    check the next poll instead of running `dev.py` (see
+    [Testing an account](#testing-an-account)).
     See [Troubleshooting](troubleshooting.md#an-enphase-account-shows-auth-failed).
 
 !!! note "What is collected"
@@ -219,15 +229,27 @@ collected stay in the database.
 
 ## Testing an account
 
-`dev.py` runs one poll for one account and sends the result to a temporary
-local receiver instead of your output API:
+`dev.py` runs one poll for one account as a dry run: it calls the provider,
+converts the answer into records and prints how many there are and which
+fields they have, without values. Nothing is stored as a record and nothing
+is sent to your output API.
 
 ```bash
 uv run python dev.py test-growatt --account-id my-home
 uv run python dev.py test-enphase --account-id office
 ```
 
-This is a real call to the provider, and it stores the result in MongoDB
-like a normal poll. The resulting record is marked as delivered, but it only
-went to the test receiver: it is **not** sent to your output API. While the service is running it counts towards the
-provider's rate limit, so don't run it repeatedly against a Growatt account.
+It does store what the provider needs to keep working, such as refreshed
+EnPhase tokens. That is why it refuses to run while a worker holds the
+account: the service and the test must not refresh the same token at once.
+
+- **A new account:** add it with `--disabled`, test it, then store it again
+  without `--disabled`. A disabled account is never held by a worker.
+- **An account the service already polls:** the next poll is the test; check
+  `manage_keys.py list` or the logs afterwards. To run `dev.py` anyway, stop
+  the service first (`podman compose stop app`, which releases its accounts)
+  and start it again afterwards. Disabling the account is not enough: the
+  worker's hold on it only runs out after *poll interval × 2*.
+
+It is a real call to the provider and counts towards its rate limit, so
+don't run it repeatedly against a Growatt account.

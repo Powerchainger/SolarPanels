@@ -88,8 +88,8 @@ uv run python manage_keys.py list
 [Managing accounts](accounts.md) covers both providers, including the
 one-time EnPhase authorization.
 
-To check an account before going live, run one poll against a local test
-receiver. Nothing is sent to your output API:
+To check an account before going live, run one poll as a dry run. Nothing
+is stored as a record or sent to your output API:
 
 ```bash
 uv run python dev.py test-growatt --account-id my-home

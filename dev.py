@@ -2,8 +2,8 @@
 
 Commands:
     dev.py serve                          Echo server — receives POSTs, prints to terminal
-    dev.py test-growatt --account-id X    One Growatt fetch cycle (in-process echo server)
-    dev.py test-enphase --account-id X    One EnPhase fetch cycle (in-process echo server)
+    dev.py test-growatt --account-id X    One Growatt fetch + transform, dry run
+    dev.py test-enphase --account-id X    One EnPhase fetch + transform, dry run
 
 MongoDB must be running for test commands (podman compose up mongo).
 """
@@ -129,23 +129,13 @@ def serve(
 # ---------------------------------------------------------------------------
 
 
-def _common_options(f):
-    """Shared CLI options for test commands."""
-    return (
-        f,
-        typer.Option(..., "--account-id", help="Account ID seeded in Mongo"),
-        typer.Option("mongodb://localhost:27017", "--mongo-uri", envvar="MONGO_URI"),
-        typer.Option("DEBUG", "--log-level", envvar="LOG_LEVEL"),
-    )
-
-
 @app.command("test-growatt")
 def test_growatt(
     account_id: str = typer.Option(..., "--account-id", help="Growatt account ID seeded in Mongo"),
     mongo_uri: str = typer.Option("mongodb://localhost:27017", "--mongo-uri", envvar="MONGO_URI"),
     log_level: str = typer.Option("DEBUG", "--log-level", envvar="LOG_LEVEL"),
 ) -> None:
-    """Run a single live Growatt fetch cycle."""
+    """Run a single live Growatt fetch cycle (dry run, nothing is delivered)."""
     logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
     asyncio.run(_run_cycle("growatt", account_id, mongo_uri))
 
@@ -156,103 +146,104 @@ def test_enphase(
     mongo_uri: str = typer.Option("mongodb://localhost:27017", "--mongo-uri", envvar="MONGO_URI"),
     log_level: str = typer.Option("DEBUG", "--log-level", envvar="LOG_LEVEL"),
 ) -> None:
-    """Run a single live EnPhase fetch cycle."""
+    """Run a single live EnPhase fetch cycle (dry run, nothing is delivered)."""
     logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
     asyncio.run(_run_cycle("enphase", account_id, mongo_uri))
 
 
+# Why a test must not run alongside the service, per provider.
+_LEASE_REASON = {
+    "enphase": "if both refresh the same token at once, one of them can lose it.",
+    "growatt": "Growatt allows about one call per endpoint per 5 minutes, so a "
+               "test now can make the service's poll fail with a rate-limit error.",
+}
+
+_DEFAULT_LEASE_REASON = "both would call the provider and update the account at once."
+
+
+def _live_lease_owner(raw_doc: dict[str, Any], now: datetime) -> str | None:
+    """The worker holding an unexpired lease on the account, if any."""
+    lease = raw_doc.get("lease") or {}
+    expires_at = lease.get("expires_at")
+    if not isinstance(expires_at, datetime):
+        return None
+    if expires_at.tzinfo is None:  # Mongo returns naive UTC
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= now:
+        return None
+    return lease.get("worker_id") or "?"
+
+
+def _describe(record: dict[str, Any]) -> str:
+    """Field names and inverter counts, never values."""
+    parts = []
+    for key, value in record.items():
+        if isinstance(value, dict):
+            nulls = sum(v is None for v in value.values())
+            parts.append(f"{key}[{len(value)}, {nulls} null]")
+        else:
+            parts.append(key if value is not None else f"{key}=null")
+    return ", ".join(parts)
+
+
 async def _run_cycle(provider: str, account_id: str, mongo_uri: str) -> None:
-    """Shared test cycle logic for both providers."""
+    """One provider fetch + transform, without the delivery side of fetch_job.
+
+    Writes no records and no health fields, so running it on the production
+    machine cannot mark anything delivered that the output API never got.
+    The provider's own state is still stored (refreshed EnPhase tokens must
+    be, or a rotated refresh token is lost; site and device caches), so it
+    refuses to run while a worker holds the account's lease: the service
+    and this command must not refresh the same token at once.
+    """
     from clients.base import TimedClient
+    from db.models import ApiConfig
     from db.mongo import get_db
-    from scheduler.jobs import fetch_job
+    from providers import get_spec
 
-    echo_server, echo_port = _start_echo_server()
-    echo_url = f"http://127.0.0.1:{echo_port}"
-    received_posts: list[dict[str, Any]] = []
-
-    # Patch _EchoHandler to capture posts in this scope.
-    original_do_post = _EchoHandler.do_POST
-
-    def _capturing_post(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
-        received_posts.append({"path": self.path, "body": body})
-        try:
-            parsed = json.loads(body)
-            typer.echo(f"  [echo] POST {self.path}")
-            typer.echo(f"  {json.dumps(parsed, indent=2, default=str)}")
-        except (json.JSONDecodeError, ValueError):
-            typer.echo(f"  [echo] POST {self.path} ({length} bytes)")
-        self.send_response(201)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"id":"echo-1","status":"received"}')
-
-    _EchoHandler.do_POST = _capturing_post  # type: ignore
-
+    doc_id = f"{provider}::{account_id}"
     typer.echo(f"\n{'='*60}")
-    typer.echo(f"  dev: {provider} live cycle")
+    typer.echo(f"  dev: {provider} live cycle (dry run)")
     typer.echo(f"  account_id  : {account_id}")
-    typer.echo(f"  echo server : {echo_url}")
-    typer.echo(f"  mongo_uri   : {mongo_uri}")
     typer.echo(f"{'='*60}\n")
 
     db = await get_db(mongo_uri)
+    raw_doc = await db.api_configs.find_one({"_id": doc_id})
+    if raw_doc is None:
+        typer.echo(f"✗ no account {doc_id} (see manage_keys.py list)", err=True)
+        raise typer.Exit(code=1)
+    owner = _live_lease_owner(raw_doc, datetime.now(UTC))
+    if owner is not None:
+        typer.echo(
+            f"✗ {doc_id} is held by worker {owner!r}, so the service is polling "
+            f"it: {_LEASE_REASON.get(provider, _DEFAULT_LEASE_REASON)} Check its next poll with "
+            f"`manage_keys.py list` instead, or stop the service first "
+            f"(`podman compose stop app`).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    raw_doc.pop("_id", None)
+    api_config = ApiConfig(**raw_doc)
+    if api_config.auth_failed:
+        typer.echo("  ! account is frozen (auth_failed): re-seed it first, see accounts docs")
 
+    spec = get_spec(provider)
+    context: dict[str, Any] = {"timestamp": datetime.now(UTC), "account_id": account_id}
     try:
         async with TimedClient() as http_client:
-            before_raw = await db.raw_responses.count_documents({"provider": provider, "account_id": account_id})
-            before_proc = await db.processed_results.count_documents({"provider": provider, "account_id": account_id})
-
-            typer.echo(f"→ Running fetch_job (live {provider} API call)...")
-            await fetch_job(
-                db=db,
-                provider=provider,
-                account_id=account_id,
-                output_base_url=echo_url,
-                output_token="",
-                http_client=http_client,
-            )
-
-            typer.echo("\n→ Results:")
-            typer.echo(f"  raw_responses      : {await db.raw_responses.count_documents({'provider': provider, 'account_id': account_id}) - before_raw} new")  # noqa: E501
-            typer.echo(f"  processed_results  : {await db.processed_results.count_documents({'provider': provider, 'account_id': account_id}) - before_proc} new")  # noqa: E501
-            typer.echo(f"  echo POSTs received: {len(received_posts)}")
-
-            acct = await db.api_configs.find_one({"_id": f"{provider}::{account_id}"}) or {}
-            typer.echo(
-                f"  account health     : auth_failed={acct.get('auth_failed', False)}"
-                f"  auth_rejections={acct.get('consecutive_auth_failures', 0)}"
-                f"  failures={acct.get('consecutive_failures', 0)}"
-            )
-            if acct.get("auth_failed"):
-                typer.echo("  ! account is frozen: it needs re-authorization (see README)")
-
-            typer.echo("\n→ Processed record statuses:")
-            cursor = db.processed_results.find(
-                {"provider": provider, "account_id": account_id},
-                {"status": 1, "last_error": 1, "retry_count": 1, "record": 1},
-            ).sort("created_at", -1).limit(5)
-            async for doc in cursor:
-                rec = doc.get("record", {})
-                typer.echo(
-                    f"  status={doc.get('status')}  "
-                    f"retry_count={doc.get('retry_count', 0)}  "
-                    f"last_error={doc.get('last_error')}  "
-                    f"record={json.dumps(rec, default=str)[:120]}"
-                )
-
+            typer.echo(f"→ Fetching (live {provider} API call)...")
+            raw_responses = await spec.fetch(api_config, db, http_client)
+        typer.echo(f"  raw responses : {len(raw_responses)}")
+        records = spec.transform(raw_responses, context)
+        typer.echo(f"  records       : {len(records)}")
+        for i, record in enumerate(records, start=1):
+            typer.echo(f"  record {i}      : {_describe(record)}")
     except Exception as e:
-        typer.echo(f"\n✗ ERROR: {e}", err=True)
-        import traceback
-        traceback.print_exc()
+        typer.echo(f"\n✗ ERROR: {type(e).__name__}: {e}", err=True)
         raise typer.Exit(code=1)
     finally:
-        _EchoHandler.do_POST = original_do_post
-        echo_server.shutdown()
         typer.echo(f"\n{'='*60}")
-        typer.echo("  Done.")
+        typer.echo("  Done. Nothing was stored as a record or sent anywhere.")
         typer.echo(f"{'='*60}")
 
 
