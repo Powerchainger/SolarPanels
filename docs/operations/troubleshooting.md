@@ -51,15 +51,30 @@ resumes polling at the next interval. No restart is needed.
 ## Growatt: error 10012, or `error_frequently_access`
 
 Growatt limits each token to about one call per endpoint per 5 minutes.
+In `manage_keys.py list` a rate-limited account shows a growing `failures`
+count, and the logs show `fetch failed for growatt::… RuntimeError:
+min_energy failed: code=10012 msg=error_frequently_access`.
+
+**Every failed poll is a gap in the data.** A poll reads only the current
+values, and a failed one is not repeated later. A block usually clears by
+itself, but it can last much longer than 5 minutes even at the default
+10-minute interval: about 50 minutes after a day of restarts and test runs,
+and several polls in a row on another occasion. Nothing in the service backs
+off during a block; it keeps polling at the normal interval.
+
 Possible causes:
 
 - The poll interval is below 300 seconds. Raise it with
   `growatt-set --interval 600`.
-- The same token is also used by other software (ShinePhone, Home
-  Assistant) at the same time.
-- `dev.py test-growatt` was run repeatedly for the account.
+- Other software calls the Growatt API with the same token at the same
+  time, such as Home Assistant. (Whether the ShinePhone app counts is not
+  confirmed, see [Managing accounts](accounts.md#adding-a-growatt-account).)
+- `dev.py test-growatt` was run repeatedly for the account, or the service
+  was restarted several times in a short period.
 
-Occasional `10012` errors are harmless: the next poll usually works.
+If the errors don't stop within an hour or so, check what else uses the
+token. Raising the interval does not help when the quota is used up
+elsewhere.
 
 ## Records are not reaching the output API
 

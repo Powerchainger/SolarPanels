@@ -77,9 +77,15 @@ shell history. Options:
     plants, only the first one is collected. These terms are explained
     under [Concepts](concepts.md#growatt).
 
-If the same token is also used by other software (the ShinePhone app, Home
-Assistant), they share the rate limit. The service caches the plant and
-device list for 24 hours to use as few calls as possible.
+The service caches the plant and device list for 24 hours, so a normal
+poll makes one call per inverter. Other software that calls the Growatt API
+with the **same token** (Home Assistant's Growatt integration, scripts)
+shares the rate limit. Whether the ShinePhone app counts towards it is not
+confirmed: as far as we know the app logs in with the owner's username and
+password rather than the API token, so heavy app use should not affect the
+service, and the service should not slow down the app. See
+[Troubleshooting](troubleshooting.md#growatt-error-10012-or-error_frequently_access)
+for what a rate-limited account looks like.
 
 ## Adding an EnPhase account
 
