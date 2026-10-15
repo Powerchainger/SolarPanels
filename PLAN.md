@@ -1,5 +1,12 @@
 # Plan: Async scraper service for EnPhase + Growatt → MongoDB → Output API
 
+> **How to read this file.** This is the original design record (July 2026),
+> kept for the reasoning behind the decisions. Where the implementation later
+> went another way, the original text stays and is marked **Superseded**
+> with the date and what replaced it. For how the service works *now*, read
+> `docs/` (start with `docs/technical/architecture.md`); for open issues,
+> `HANDOVER.md`.
+
 ## Context
 
 The existing repo contains two synchronous, per-folder scrapers that log to CSV (`EnPhase/inverter_log.csv`, `Growatt/growatt_log.csv`) using two separate `BackgroundScheduler` processes. The goal is to consolidate them into a single Python asyncio service that:
@@ -72,6 +79,11 @@ Two prerequisite findings before any of this is built:
    Upgrade path: replace with native httpx in clients/growatt.py only.
 ```
 
+> **Superseded** (2026-08-03 / 2026-10-14): `_id` is the string
+> `"<provider>::<account_id>"`, not a sub-document. One worker is the decided
+> target for the ~100-account horizon; a second worker works as a standby
+> (sync job, 2026-10-14) but accounts are not balanced between workers.
+
 ## Summary of the two source APIs
 
 ### EnPhase (REST, OAuth2)
@@ -85,6 +97,9 @@ Two prerequisite findings before any of this is built:
 - **Cadence in existing code:** hourly (`EnPhase/run_scheduler.py:61`).
 - **State that must persist across restarts:** `access_token`, `refresh_token`, `expires_at`, `expires_in`, `token_type`, `api_key`, `client_id`, `client_secret`, plus a memoised `site_id` + site `name` (the existing in-process `SESSION_CACHE` is lost on restart).
 
+  > **Superseded** (2026-10-14): the site `name` is no longer stored or sent
+  > (it is a customer name under GDPR); only `site_id` is cached.
+
 ### Growatt (vendor SDK, sync)
 
 - **Library:** `growattServer.OpenApiV1(token=…)` — a synchronous library built on `requests`. We will not re-implement the HTTP shape; we will reuse the library via `asyncio.to_thread`.
@@ -95,6 +110,12 @@ Two prerequisite findings before any of this is built:
   - `api.min_energy(device_sn=sn)` → `{pac, ppv, bdc1Soc, …}` (strings).
 - **Processed row shape (one row per inverter per cycle):** `{timestamp (Europe/Amsterdam), device_sn, ac_power_watts (float), pv_power_watts (float), soc_percent (int)}`.
 - **Cadence in existing code:** every 5 minutes; a 2s sleep between per-device calls inside one cycle (the user reports frequent timeouts otherwise — preserve this).
+
+  > **Superseded** (2026-07-28): the default Growatt interval is 10 minutes.
+  > Growatt allows about one call per endpoint per 5 minutes per token and
+  > answers faster polling with error `10012`; blocks have lasted far longer
+  > than 5 minutes (see `docs/operations/troubleshooting.md`). The 2 s
+  > per-device sleep is kept.
 
 ## Review of the proposed implementation plan
 
@@ -186,6 +207,10 @@ The system is designed for **multiple worker machines**, each responsible for a 
 
 **Per-key parallelism is free.** Each account has its own API token / OAuth credentials, so rate-limit buckets are fully independent. The constraint is local (threadpool), not remote.
 
+> **Superseded in part** (2026-10-15): independent across accounts, yes;
+> but within one Growatt account the per-token rate limit is the binding
+> constraint, and it is remote. See the Growatt cadence note above.
+
 **Growatt async upgrade path.** When horizontal scaling is no longer sufficient, replace the three `growattServer` calls with native httpx equivalents *inside `clients/growatt.py` only*. The async facade interface (`list_plants`, `list_devices`, `device_energy`) stays identical; nothing outside that file changes. Estimated effort: ~4 hours. A full upstream `AsyncOpenApiV1` contribution to [indykoning/PyPi_GrowattServer](https://github.com/indykoning/PyPi_GrowattServer) is a cleaner long-term option (the V1 API is ~11 endpoints; the mechanical httpx conversion is 2–4 days) but is decoupled from the product timeline.
 
 **Design implications baked into the plan:**
@@ -195,6 +220,15 @@ The system is designed for **multiple worker machines**, each responsible for a 
 3. APScheduler `max_instances=1` per `(provider, account_id)` — same account never overlaps itself; different accounts run in parallel.
 4. Stagger initial fire times across accounts (`hash(account_id) % interval_seconds` offset) to avoid thundering-herd on restart.
 
+> **Superseded** (2026-08-03 / 2026-10-07): single worker is the decision for
+> the ~100-account horizon; the lease machinery is built and used by that one
+> worker. Lease renewal is a fixed `LEASE_RENEWAL_INTERVAL` (30 s), not half
+> the shortest interval. A worker's first fetch of an account resumes the
+> previous rhythm (`last_fetch_at + interval`) and falls back to the hash
+> stagger only when the last fetch is older than one interval, because a
+> restart shortly after a fetch tripped Growatt's rate limit. The flush
+> jitter is random (5–30 s), not derived from `WORKER_ID`.
+
 ### Improvements / corrections
 
 1. **Drop Polars.** Both transforms are row-shaped (one EnPhase summary row per cycle, N device rows per Growatt cycle). Pydantic models alone cover validation and shape. Polars adds a heavyweight dependency without aggregation work to justify it.
@@ -203,12 +237,21 @@ The system is designed for **multiple worker machines**, each responsible for a 
    - Transient (httpx `ConnectError`/`TimeoutException`, HTTP 5xx, 429) → retry up to 3× exponential.
    - 4xx other than 429 → do not retry; mark record `status=failed`, `last_error`, `retry_count`, leave for human review (don't burn retries on a permanent 401).
 
+   > **Superseded in part:** tenacity is used only for the output POST
+   > (`clients/output.py`). Provider calls are not retried within a cycle;
+   > a failed poll is lost until the next one (`HANDOVER.md`, question 5).
+
 3. **Record status as an enum, not just `posted: bool`.** `processed_results` document: `status ∈ {pending, posting, posted, failed}`, `retry_count`, `last_error`, `last_attempt_at`. The flush job picks `status ∈ {pending, failed}` with `retry_count < N`, sets `posting` (atomic find-and-update) before sending — prevents double-post if a scheduler tick races a flush.
 
    Two failure modes the flush job must also handle:
 
    - **Stuck `posting` records.** If a worker crashes between claiming a record (`status=posting`) and completing the POST, that record is orphaned — the `{pending, failed}` filter never picks it up again. The flush job must additionally reclaim `posting` records whose `last_attempt_at` is older than a staleness threshold (a few minutes).
    - **Two retry levels with separate counters.** Tenacity's up-to-3× backoff is *internal to one delivery attempt* and must not increment the `retry_count` that gates the flush job — otherwise a single bad cycle (3 tenacity attempts) immediately disqualifies the record from ever being flushed. `retry_count` counts delivery attempts (flush-level), with its own cap. Records that exhaust the cap stay `failed` for human review — log/count them so the backlog monitoring (see multi-machine section) surfaces them rather than letting them sit silently.
+
+   > **Note** (2026-10-15): the atomic claim was only implemented on
+   > 2026-10-14 (`3c624e2`); until then the flush did a plain `find()`. Each
+   > claim is now stamped with its own time and the outcome is written only
+   > while that stamp holds (`3e7f842`).
 
 4. **TTL on `raw_responses`.** Useful for debugging but grows unboundedly. Add a Mongo TTL index on `created_at` (default 30 days, configurable via env). Storing raw responses can also be made opt-in via an `api_configs.store_raw: bool` flag to control bytes.
 
@@ -217,6 +260,11 @@ The system is designed for **multiple worker machines**, each responsible for a 
 6. **EnPhase token refresh stays inline, not a separate job.** Check `should_refresh(expires_at)` immediately before each EnPhase fetch (as the current code does). Persist refreshed tokens back to Mongo. No second scheduled job needed — keeps state transitions in one place.
 
 7. **Validate `api_configs` documents with Pydantic on boot.** A bad doc (missing `interval_seconds`, missing `api_key`, etc.) should fail the container fast with a clear error rather than silently no-op.
+
+   > **Superseded:** documents are validated, but a bad one degrades only
+   > that account: `claim_leases` logs it and skips it, so one broken account
+   > cannot stop polling for all others. Settings (env) errors still stop the
+   > container at boot.
 
 8. **`api_configs` schema sketch** (one doc per account, keyed on `(provider, account_id)`):
    ```
@@ -237,13 +285,33 @@ The system is designed for **multiple worker machines**, each responsible for a 
    ```
    EnPhase's per-account `site_id` is cached in `site_cache` (replacing the in-process `SESSION_CACHE`), and refreshed on a cache miss or when systems API returns a new one.
 
+   > **Superseded:** the actual document is `db/models.py:ApiConfig`. `_id`
+   > is `"<provider>::<account_id>"`; `site_cache` holds only `site_id`;
+   > Growatt has a `growatt_cache` (plant and devices, 24 h); there are
+   > health fields (`last_success_at`, `last_fetch_at`, failure counters,
+   > `auth_failed`) and `seeded_at`, which guards provider writes against a
+   > concurrent re-seed. Default intervals are 3600 s (EnPhase) and 600 s
+   > (Growatt), minimum 60 s (2026-10-15). Secret credential fields are
+   > Fernet-encrypted (2026-08-13).
+
 9. **`clients/base.py` responsibilities** — shared async httpx client (one per process), `tenacity` retry decorator, structured logging hook, request/response size + duration logging. Both EnPhase and the output poster use it; Growatt does not (vendor SDK).
+
+   > **Superseded in part:** `clients/base.py` provides `TimedClient`
+   > (logging, default timeouts) and `AuthFailedError`; the retry lives in
+   > `clients/output.py` (see item 2). The Growatt SDK got its own timeout
+   > (2026-10-15).
 
 10. **Single schema = storage + wire.** Define one Pydantic model per source for the *processed* row (e.g. `EnphaseRow`, `GrowattRow`) and reuse the same model for both the Mongo document and the POST body. One source of truth, fewer drift bugs.
 
 11. **No Polars, no pandas.** The existing CSV writing was pandas-driven; that goes away. Pandas/Polars are unnecessary for this workload. **Action item:** `pyproject.toml` currently still lists `pandas>=3.0.3` — nothing in the new code uses it; remove it (it is the heaviest item in the dependency tree). `motor` is likewise still listed; its removal is already scheduled for IMPL.md Step 3 when `db/mongo.py` is built.
 
+    > **Done:** neither `pandas` nor `motor` is a dependency any more.
+
 12. **APScheduler config**: `AsyncIOScheduler`, one job per enabled `(provider, account_id)` loaded at boot from `api_configs`, `max_instances=1`, `coalesce=True` (matches existing semantics), `misfire_grace_time` set so a paused container resuming doesn't fire a backlog. Config changes require a restart — documented, not silently reloaded.
+
+    > **Superseded** (2026-10-14): a sync job re-claims accounts every
+    > minute and adds, reschedules or removes fetch jobs, so account changes
+    > (new, disabled, changed interval) apply without a restart.
 
 13. **Dockerfile**: `python:3.13-slim` — see "Python version" below. Multi-stage (build wheels in one stage, copy into runtime), non-root user, no compilers in final image. No CSV volume needed — Mongo is the store now.
 
@@ -254,6 +322,13 @@ The system is designed for **multiple worker machines**, each responsible for a 
     - `manage_keys.py growatt set --account-id <id> --token …`
     - `manage_keys.py list` / `manage_keys.py delete --provider <p> --account-id <id>`
     The README's warning that `auth_code` expires quickly applies here too — the bootstrap must be a single self-contained command, not a multi-step manual procedure.
+
+    > **Superseded / not built:** there is no `enphase bootstrap`. The
+    > commands are `enphase-set`, `growatt-set`, `list`, `delete` and
+    > `migrate-encrypt`. The auth-code exchange still uses the legacy
+    > `EnPhase/access_token_gen.py`, and `enphase-set --from-file` stores the
+    > result; the procedure is in `docs/operations/accounts.md`. Folding the
+    > exchange into one command remains a known limitation (`HANDOVER.md`).
 
 16. **Don't copy `EnPhase/auth.py` and `access_token_gen.py` verbatim.** They have merge conflicts and use `http.client` synchronously. Rewrite as small async functions in `clients/enphase.py` using httpx. The logic is short and well-understood from the existing code; reimplementation is lower risk than untangling the conflict.
 
@@ -290,6 +365,11 @@ Adding a third upstream provider should touch two layers, kept deliberately sepa
   plus its three implementation files (client, credentials model, transform function) — no
   `if/elif` chains anywhere.
 
+  > **Superseded in part:** built as `ProviderSpec(credentials_class, fetch,
+  > transform)`, and a new provider touches more than three files (secret
+  > fields, `manage_keys.py`, `dev.py`, docs). The full checklist is
+  > `docs/technical/adding-a-provider.md`.
+
 Deliberately **not** a unified `Provider` ABC that bundles fetch + transform: that would
 collapse the client/transform seam that IMPL.md Step 4 relies on (transforms are pure
 functions testable against fixture JSON with no network). The registry sits *above* that
@@ -313,6 +393,9 @@ Pin the version in both `Dockerfile` (base image) and a `.python-version` / `pyp
 ### Open questions noted but not blocking
 
 - Output API: contract not in scope here. Assumes a JSON POST accepting one record at a time. If the receiver later requires bulk, change `clients/output.py` only.
+  *(2026-10-15: the output API does not exist yet and is built by someone
+  else; `dev.py serve` stands in. The record format in `docs/index.md` is
+  the spec.)*
 - Multi-site / multi-plant within one account: existing code only ever uses `systems[0]` / `plants[0]`. The new service keeps that single-site-per-account assumption for parity. If multi-site is ever needed, `api_configs` documents can be split per (account, site).
 
 ## Deployment upgrade path
@@ -320,6 +403,14 @@ Pin the version in both `Dockerfile` (base image) and a `.python-version` / `pyp
 The application code is multi-machine-ready from the start (lease mechanism, `WORKER_ID`,
 central MongoDB). The upgrade between stages is purely operational — no code changes
 required at any stage.
+
+> **Superseded in part** (2026-08-03 / 2026-10-14): only Stage 0 is in use,
+> and single worker is the decision for the current horizon. Stage 0's
+> MongoDB requires authentication (2026-08-12), so `MONGO_URI` carries
+> credentials. In Stage 2, accounts are **not** distributed automatically:
+> they go first-come to whichever worker claims them, with no rebalancing
+> (a second worker acts as a standby). `podman compose --scale` would give
+> every replica the same `WORKER_ID`.
 
 ### Stage 0 — Single machine (initial target)
 
@@ -449,6 +540,12 @@ For automated scaling, rolling deploys, and centralised secret management.
 
 ### dev_run.py — live test harness (IMPL.md Step 6)
 
+> **Superseded:** the script is `dev.py` (`serve`, `test-growatt`,
+> `test-enphase`) and it was kept rather than absorbed into `main.py`. Since
+> 2026-10-15 `test-*` is a dry run: fetch and transform only, prints field
+> names (no values), writes no records, and refuses while a worker holds
+> the account. The description below is the original harness.
+
 `dev_run.py` runs a single live fetch cycle against a real API without starting
 the scheduler.  It spins up a stdlib `http.server` echo server in a background
 thread (zero new dependencies), calls the production `fetch_job` from
@@ -506,16 +603,14 @@ Supported file formats:
 See [IMPL.md](IMPL.md) for the step-by-step implementation plan, file inventory,
 functions to port, and verification checklist.
 
-### Current status (July 2026)
+### Current status (2026-10-15)
 
-Steps 1–11 and Step 10 (EnPhase client) are complete. Step 6 is done for EnPhase
-(live API test passed end-to-end); Growatt is pending a real API token. Steps 12–13
-(`main.py` + Dockerfile) remain.
+*Replaces the July 2026 status, which is in git history.*
 
-Four maintenance items are tracked in IMPL.md under **"Maintenance / follow-up items"**:
-- **M1** — Full README rewrite (legacy README points at the old folder-based scripts)
-- **M2** — Fix `.gitignore` so `uv.lock` and JSON test fixtures can be committed
-- **M3** — Add `[project.scripts]` entries so `manage-keys` and `dev-run` run as proper CLI commands
-- **M4** — Commit `uv.lock` (blocked on M2)
+All IMPL.md steps are done and the service runs in containers (single
+worker, two test accounts). Maintenance items: M1 (README) done, M2/M4
+(`uv.lock` committed) done, M3 (console scripts) dropped on 2026-10-14
+because they never installed in this virtual project.
 
-None of the maintenance items require API tokens and can be tackled in any order.
+Current behaviour is documented in `docs/`; known limitations, open
+product questions and possible future work are in `HANDOVER.md`.
