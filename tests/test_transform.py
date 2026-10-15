@@ -91,6 +91,51 @@ def test_parse_enphase_inverter_without_report_date_skipped():
     assert rows[0].total_power == pytest.approx(100.0)
 
 
+def _inverter(serial, report, power):
+    return {"serial_number": serial, "last_report_date": report,
+            "power_produced": power}
+
+
+def test_parse_enphase_labels_inverters_by_serial_number():
+    body = [{"micro_inverters": [
+        _inverter("SN-B", "2026-07-17T12:00:00+00:00", {"value": 10.0}),
+        _inverter("SN-A", "2026-07-17T12:00:00+00:00", {"value": 20.0}),
+    ]}]
+    assert parse_enphase(body, account_id="acct")[0].inverters == {"SN-B": 10.0, "SN-A": 20.0}
+
+
+def test_parse_enphase_timestamp_is_newest_report():
+    """One inverter offline for days must not pin the record to its last report."""
+    body = [{"micro_inverters": [
+        _inverter("SN-1", "2026-07-14T12:00:00+00:00", {"value": 0.0}),
+        _inverter("SN-2", "2026-07-17T12:00:00+00:00", {"value": 20.0}),
+    ]}]
+    assert parse_enphase(body, account_id="acct")[0].timestamp == datetime(
+        2026, 7, 17, 12, 0, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize("power", [None, {"value": None}, {}])
+def test_parse_enphase_null_power_is_null_not_a_crash(power):
+    body = [{"micro_inverters": [
+        _inverter("SN-1", "2026-07-17T12:00:00+00:00", power),
+        _inverter("SN-2", "2026-07-17T12:00:00+00:00", {"value": 20.0}),
+    ]}]
+    row = parse_enphase(body, account_id="acct")[0]
+    assert row.inverters == {"SN-1": None, "SN-2": 20.0}
+    assert row.total_power == pytest.approx(20.0)
+
+
+def test_parse_enphase_total_is_null_when_no_inverter_reported_power():
+    body = [{"micro_inverters": [
+        _inverter("SN-1", "2026-07-17T12:00:00+00:00", None),
+    ]}]
+    row = parse_enphase(body, account_id="acct")[0]
+    assert row.total_power is None
+    # The record stays serializable for the output API.
+    assert row.model_dump(mode="json")["inverters"] == {"SN-1": None}
+
+
 # ---------------------------------------------------------------------------
 # parse_growatt
 # ---------------------------------------------------------------------------
@@ -139,12 +184,12 @@ def test_parse_growatt_empty_responses():
     assert rows == []
 
 
-def test_parse_growatt_missing_fields_default_zero():
-    responses: list[tuple[str, dict]] = [
-        ("SN001", {}),  # all fields missing
-    ]
+@pytest.mark.parametrize("raw", [{}, {"pac": None, "ppv": None, "bdc1Soc": None},
+                                 {"pac": "", "ppv": "", "bdc1Soc": ""}])
+def test_parse_growatt_missing_values_are_null(raw):
+    """No data is not zero: missing, null and empty values become None."""
     ts = datetime(2026, 7, 17, 12, 0, 0, tzinfo=UTC)
-    rows = parse_growatt(responses, timestamp=ts, account_id="acct")
-    assert rows[0].ac_power_watts == 0.0
-    assert rows[0].pv_power_watts == 0.0
-    assert rows[0].soc_percent == 0
+    rows = parse_growatt([("SN001", raw)], timestamp=ts, account_id="acct")
+    assert rows[0].ac_power_watts is None
+    assert rows[0].pv_power_watts is None
+    assert rows[0].soc_percent is None

@@ -49,14 +49,16 @@ timestamps are UTC.
 {
   "account_id": "office",
   "timestamp": "2026-10-14T12:15:00Z",
-  "inverters": {"inverter_1": 150.5, "inverter_2": 148.0},
+  "inverters": {"482301012345": 150.5, "482301012346": 148.0},
   "total_power": 298.5
 }
 ```
 
-`inverters` maps each micro-inverter to its current output in watts, and
-`total_power` is their sum. `timestamp` is the time the first inverter last
-reported to EnPhase.
+`inverters` maps each micro-inverter, by serial number, to its current output
+in watts, and `total_power` is their sum. An inverter that reported no power
+has `null`; it is left out of `total_power`, which is itself `null` if no
+inverter reported any. `timestamp` is the time of the most recent inverter
+report to EnPhase.
 
 **Growatt**: one record per inverter per poll:
 
@@ -72,8 +74,8 @@ reported to EnPhase.
 ```
 
 `ac_power_watts` is the AC output, `pv_power_watts` the solar panel input,
-and `soc_percent` the battery state of charge. `timestamp` is the time of the
-poll.
+and `soc_percent` the battery state of charge. Each is `null` when Growatt
+sent no value for it. `timestamp` is the time of the poll.
 
 Every record carries the `account_id` the account was stored under (see
 [Managing accounts](operations/accounts.md)), so your API can tell

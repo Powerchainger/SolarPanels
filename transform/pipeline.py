@@ -12,11 +12,20 @@ Legacy parsing logic:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from transform.schemas import EnphaseRow, GrowattRow
 
 logger = logging.getLogger(__name__)
+
+
+def _optional[T](cast: Callable[[Any], T], value: Any) -> T | None:
+    """`cast(value)`, or None when the provider sent no value (missing, null, "")."""
+    if value is None or value == "":
+        return None
+    return cast(value)
 
 
 def parse_enphase(raw_body: list | dict, *, account_id: str) -> list[EnphaseRow]:
@@ -42,7 +51,7 @@ def parse_enphase(raw_body: list | dict, *, account_id: str) -> list[EnphaseRow]
     if not micro_inverters:
         raise ValueError("missing or empty micro_inverters in EnPhase response")
 
-    inverters: dict[str, float] = {}
+    inverters: dict[str, float | None] = {}
     timestamp: datetime | None = None
 
     for i, inv in enumerate(micro_inverters):
@@ -59,17 +68,23 @@ def parse_enphase(raw_body: list | dict, *, account_id: str) -> list[EnphaseRow]
         else:
             dt = dt.astimezone(UTC)
 
-        if timestamp is None:
-            # Use the timestamp from the first inverter as the cycle timestamp.
+        # The newest report is the cycle timestamp: one inverter that has been
+        # offline for days must not pin the whole record to its last report.
+        if timestamp is None or dt > timestamp:
             timestamp = dt
 
-        power = float(inv.get("power_produced", {}).get("value", 0))
-        inverters[f"inverter_{i + 1}"] = power
+        # Keyed by serial number, which stays put if EnPhase reorders the
+        # list; the position is only a fallback for an entry without one.
+        label = inv.get("serial_number") or f"inverter_{i + 1}"
+        # A null power (non-reporting inverter) stays null rather than 0, so
+        # the consumer can tell "no data" from "producing nothing".
+        inverters[label] = _optional(float, (inv.get("power_produced") or {}).get("value"))
 
     if timestamp is None:
         raise ValueError("no valid inverter timestamps in EnPhase response")
 
-    total_power = sum(inverters.values())
+    reported = [p for p in inverters.values() if p is not None]
+    total_power = sum(reported) if reported else None
 
     return [
         EnphaseRow(
@@ -101,7 +116,8 @@ def parse_growatt(
         ppv     → pv_power_watts (float)
         bdc1Soc → soc_percent   (int)
 
-    All three arrive as strings from the API; we coerce here.
+    All three arrive as strings from the API; we coerce here. A missing,
+    null or empty value becomes None: no data is not the same as zero.
     """
     # Ensure timestamp is UTC-aware.
     if timestamp.tzinfo is None:
@@ -116,9 +132,9 @@ def parse_growatt(
                 account_id=account_id,
                 timestamp=timestamp,
                 device_sn=device_sn,
-                ac_power_watts=float(raw.get("pac", 0)),
-                pv_power_watts=float(raw.get("ppv", 0)),
-                soc_percent=int(raw.get("bdc1Soc", 0)),
+                ac_power_watts=_optional(float, raw.get("pac")),
+                pv_power_watts=_optional(float, raw.get("ppv")),
+                soc_percent=_optional(int, raw.get("bdc1Soc")),
             )
         )
 
