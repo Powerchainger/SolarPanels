@@ -230,12 +230,15 @@ async def fetch_job(
 
     # --- Write ProcessedRecords + POST ---------------------------------------
     for rec_dict in record_dicts:
+        # Stamped now, not at cycle start: a slow cycle would otherwise insert
+        # a record that flush pass 2 already sees as stale while we POST it.
+        claimed_at = _claim_time()
         pr = ProcessedRecord(
             provider=provider,
             account_id=account_id,
             record=rec_dict,
             status=RecordStatus.POSTING,
-            last_attempt_at=now,
+            last_attempt_at=claimed_at,
             created_at=now,
         )
         # Python mode: dates stay BSON dates, so date queries (and a future TTL)
@@ -264,22 +267,44 @@ async def fetch_job(
             new_status = RecordStatus.POSTING
             last_error = result.error_message
 
-        update: dict[str, Any] = {
-            "status": new_status,
-            "last_error": last_error,
-            "last_attempt_at": now,
-            "retry_count": 0,
-        }
-
-        await db.processed_results.update_one(
-            {"_id": pr_id},
-            {"$set": update},
+        await _write_outcome(
+            db, pr_id, claimed_at, {"status": new_status, "last_error": last_error}
         )
 
 
 # ---------------------------------------------------------------------------
 # Flush job
 # ---------------------------------------------------------------------------
+
+
+def _claim_time() -> datetime:
+    """Now, truncated to Mongo's millisecond precision.
+
+    A claim stamps `last_attempt_at` with this value and the outcome write
+    matches on it, so it must survive the round trip through BSON unchanged.
+    """
+    now = datetime.now(UTC)
+    return now.replace(microsecond=now.microsecond // 1000 * 1000)
+
+
+async def _write_outcome(
+    db: AsyncDatabase, doc_id: Any, claimed_at: datetime, update: dict[str, Any]
+) -> None:
+    """Record a POST outcome, but only while our claim on the record holds.
+
+    If the POST outlasted the stale threshold, another flush may have
+    reclaimed the record (new `last_attempt_at`) and owns its outcome now;
+    overwriting it could undo a `posted` or reset a retry count.
+    """
+    result = await db.processed_results.update_one(
+        {"_id": doc_id, "status": RecordStatus.POSTING, "last_attempt_at": claimed_at},
+        {"$set": update},
+    )
+    if result.matched_count == 0:
+        logger.warning(
+            "record %s was reclaimed during its POST, outcome %s not written",
+            doc_id, update.get("status"),
+        )
 
 
 async def _claim_record(
@@ -320,7 +345,9 @@ async def flush_job(
          crashed worker.
 
     Each record is claimed atomically before its POST, so several workers
-    can flush at once without sending a record twice. Delivery is still
+    can flush at once without sending a record twice. Each claim stamps
+    `last_attempt_at` with its own time, and the outcome is only written
+    while that stamp is still on the record. Delivery is still
     at-least-once: a crash between a successful POST and the status write
     leaves the record `posting`, and pass 2 sends it again.
 
@@ -335,13 +362,17 @@ async def flush_job(
         "status": {"$in": [RecordStatus.PENDING, RecordStatus.FAILED]},
         "retry_count": {"$lt": max_retries},
     }
-    claim_retriable = {
-        "$set": {"status": RecordStatus.POSTING, "last_attempt_at": now},
-        "$inc": {"retry_count": 1},
-    }
 
     retried = 0
     for _ in range(FLUSH_BATCH):
+        # Stamp each claim with its own time, not the run's start: a record
+        # claimed late in a long run must not already look stale to pass 2
+        # of another worker's flush.
+        claimed_at = _claim_time()
+        claim_retriable = {
+            "$set": {"status": RecordStatus.POSTING, "last_attempt_at": claimed_at},
+            "$inc": {"retry_count": 1},
+        }
         doc = await _claim_record(db, query_retriable, claim_retriable, seen)
         if doc is None:
             break
@@ -356,7 +387,7 @@ async def flush_job(
             token=output_token,
         )
 
-        update: dict[str, Any] = {"last_attempt_at": now}
+        update: dict[str, Any] = {}
         if result.success:
             update["status"] = RecordStatus.POSTED
             update["last_error"] = None
@@ -374,7 +405,7 @@ async def flush_job(
                     doc_id, new_retry_count,
                 )
 
-        await db.processed_results.update_one({"_id": doc_id}, {"$set": update})
+        await _write_outcome(db, doc_id, claimed_at, update)
         retried += 1
 
     if retried:
@@ -386,10 +417,11 @@ async def flush_job(
         "status": RecordStatus.POSTING,
         "last_attempt_at": {"$lt": stale_cutoff},
     }
-    claim_stale = {"$set": {"last_attempt_at": now}}
 
     reclaimed = 0
     for _ in range(FLUSH_BATCH):
+        claimed_at = _claim_time()
+        claim_stale = {"$set": {"last_attempt_at": claimed_at}}
         doc = await _claim_record(db, query_stale, claim_stale, seen)
         if doc is None:
             break
@@ -402,15 +434,12 @@ async def flush_job(
             token=output_token,
         )
 
-        update = {"last_attempt_at": now}
         if result.success:
-            update["status"] = RecordStatus.POSTED
-            update["last_error"] = None
+            update = {"status": RecordStatus.POSTED, "last_error": None}
         else:
-            update["status"] = RecordStatus.FAILED
-            update["last_error"] = result.error_message
+            update = {"status": RecordStatus.FAILED, "last_error": result.error_message}
 
-        await db.processed_results.update_one({"_id": doc_id}, {"$set": update})
+        await _write_outcome(db, doc_id, claimed_at, update)
         reclaimed += 1
 
     if reclaimed:

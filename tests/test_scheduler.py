@@ -5,6 +5,7 @@ All Mongo and HTTP calls are mocked.  No network, no real DB.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -212,8 +213,10 @@ async def test_fetch_job_writes_raw_and_processed():
     assert isinstance(pr_doc["created_at"], datetime)
     assert isinstance(pr_doc["last_attempt_at"], datetime)
     assert pr_doc["status"] == "posting"
-    pr_update = db.processed_results.update_one.call_args[0][1]["$set"]
-    assert isinstance(pr_update["last_attempt_at"], datetime)
+    # The outcome is written only while the record still carries our claim.
+    pr_filter = db.processed_results.update_one.call_args[0][0]
+    assert pr_filter["last_attempt_at"] == pr_doc["last_attempt_at"]
+    assert pr_filter["status"] == "posting"
 
 
 async def test_fetch_job_skipps_missing_config():
@@ -537,7 +540,49 @@ async def test_flush_job_reclaims_stale_posting_records():
     assert stale_filter["status"] == RecordStatus.POSTING
     assert isinstance(stale_filter["last_attempt_at"]["$lt"], datetime)
     assert isinstance(stale_claim["$set"]["last_attempt_at"], datetime)
-    assert isinstance(update_dict["last_attempt_at"], datetime)
+    # The outcome write is conditioned on that same claim stamp.
+    update_filter = db.processed_results.update_one.call_args[0][0]
+    assert update_filter["last_attempt_at"] == stale_claim["$set"]["last_attempt_at"]
+
+
+@respx.mock
+async def test_flush_job_stamps_each_claim_with_its_own_time():
+    """A record claimed late in a long run must not look stale already."""
+    db = _flush_db(_failed_doc("doc-1"), _failed_doc("doc-2"))
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(200))
+
+    stamps = iter([
+        datetime(2026, 7, 17, 12, 0, tzinfo=UTC),
+        datetime(2026, 7, 17, 12, 7, tzinfo=UTC),
+        datetime(2026, 7, 17, 12, 8, tzinfo=UTC),
+        datetime(2026, 7, 17, 12, 9, tzinfo=UTC),
+        datetime(2026, 7, 17, 12, 10, tzinfo=UTC),
+    ])
+    with patch("scheduler.jobs._claim_time", side_effect=lambda: next(stamps)):
+        await _run_flush(db, max_retries=5)
+
+    claims = db.processed_results.find_one_and_update.call_args_list
+    assert claims[0][0][1]["$set"]["last_attempt_at"] == datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+    assert claims[1][0][1]["$set"]["last_attempt_at"] == datetime(2026, 7, 17, 12, 7, tzinfo=UTC)
+
+
+@respx.mock
+async def test_flush_job_does_not_overwrite_a_record_reclaimed_mid_post(caplog):
+    """If another flush reclaimed the record, its outcome is not ours to write."""
+    db = _flush_db(_failed_doc("doc-1"))
+    db.processed_results.update_one.return_value = MagicMock(matched_count=0)
+    respx.post("https://output.example.com/records").mock(return_value=httpx.Response(200))
+
+    with caplog.at_level(logging.WARNING, logger="scheduler.jobs"):
+        await _run_flush(db, max_retries=5)
+
+    assert "reclaimed during its POST" in caplog.text
+
+
+def test_claim_time_survives_bson_millisecond_precision():
+    from scheduler.jobs import _claim_time
+
+    assert _claim_time().microsecond % 1000 == 0
 
 
 async def test_fetch_job_failure_logs_one_line_without_traceback(caplog):
