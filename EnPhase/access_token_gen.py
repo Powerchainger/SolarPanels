@@ -1,6 +1,7 @@
 import requests
 import base64
 import json
+import os
 from datetime import datetime, timedelta
 
 def access_creds():    
@@ -25,7 +26,8 @@ def access_creds():
     }
 
     print("Requesting tokens from EnPhase...")
-    response = requests.post(URL, headers=headers, data=data)
+    # The auth code is single-use and short-lived: fail rather than hang.
+    response = requests.post(URL, headers=headers, data=data, timeout=(10, 30))
 
     if response.status_code == 200:
         tokens = response.json()
@@ -41,12 +43,22 @@ def access_creds():
             "expires_in": expires_in_seconds,
             "expires_at": expires_at
         }
-        with open("credentials.json", "w") as f:
+        # Owner-only: the refresh token gives month-long access to the
+        # customer's data. fchmod also tightens a file left by an earlier run.
+        fd = os.open("credentials.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(save_dict, f, indent=4)
         print("credentials.json created successfully.")
     else:
         print(f"Failed! Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
+        # Only the OAuth error fields, not the raw body.
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and "error" in body:
+            print(f"Error: {body['error']}: {body.get('error_description', '')}")
 
 if __name__ == "__main__":
     access_creds()
