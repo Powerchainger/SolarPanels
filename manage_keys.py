@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run
 """CLI for managing api_configs documents in MongoDB.
 
 Commands:

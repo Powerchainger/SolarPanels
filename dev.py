@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run
 """Development tools: echo server + live fetch cycle tests.
 
 Commands:

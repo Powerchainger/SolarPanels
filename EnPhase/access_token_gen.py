@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run
 import requests
 import base64
 import json
