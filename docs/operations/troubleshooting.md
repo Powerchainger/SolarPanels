@@ -115,6 +115,14 @@ few rounds.
   directly, but only runs while no worker holds the account (see
   [Testing an account](accounts.md#testing-an-account)).
 
+## `podman compose down` fails after running several workers
+
+Errors such as `has dependent containers which must be removed before it`
+or `network is being used` mean replicas started with `--scale` are still
+there: podman-compose only removes the first one. See
+[Stopping several workers](maintenance.md#stopping-several-workers) for
+how to remove them.
+
 ## `InvalidToken` in the logs
 
 Stored credentials could not be decrypted, which means `ENCRYPTION_KEY` is

@@ -163,3 +163,38 @@ How accounts are divided:
   worker, a crash between sending a record and recording that it was sent
   means it is sent again later, so your output API should tolerate an
   occasional duplicate.
+
+### Stopping several workers
+
+podman-compose only tracks the first replica of a scaled service, so
+`podman compose down` leaves the others running. Scale back to one worker
+first, then stop:
+
+```bash
+podman compose up -d --scale app=1
+podman compose down
+```
+
+If `down` was run without scaling back, it fails with errors such as
+`has dependent containers which must be removed before it` or
+`network is being used`. List what is left (container names start with
+the Compose project name, `solarpanels` by default):
+
+```bash
+podman ps -a --filter name=_app_ --format '{{.Names}} {{.Status}}'
+```
+
+Stop and remove every `app` container still listed, then run `down` again:
+
+```bash
+podman stop -t 70 solarpanels_app_2 solarpanels_app_3
+podman rm solarpanels_app_2 solarpanels_app_3
+podman compose down
+```
+
+`-t 70` matches the Compose `stop_grace_period`, so running jobs can
+finish and leases are released. If MongoDB was already stopped, the
+workers cannot release their leases or unregister and log errors about
+it; that is harmless, as other workers take the accounts over within
+about three minutes of the next start. Your data stays in the MongoDB
+volume either way.
