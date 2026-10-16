@@ -142,9 +142,16 @@ listens on `127.0.0.1`), so they need a separate MongoDB deployment.
 
 How accounts are divided:
 
-- Every minute, each worker claims any account that no other running worker
-  holds. Which worker gets a new account is first come, first served;
-  accounts are not rebalanced between workers.
+- Every minute, each worker claims free accounts up to its fair share:
+  the number of enabled accounts divided by the number of running workers,
+  rounded up. A worker holding more than that releases the rest, so after
+  you add a worker the accounts spread out within a few minutes
+  (`released … account(s) to balance load` in the logs). With 10 accounts
+  and 3 workers, that is 4, 4 and 2.
+- Workers are balanced by number of accounts, not by how often each
+  account is polled. A Growatt account (every 6 minutes) costs about ten
+  times as many provider calls as an EnPhase account (every hour), so two
+  workers with the same number of accounts can have quite different loads.
 - If a worker dies, its heartbeat stops, and another worker takes over its
   accounts within about three minutes. A worker that holds nothing simply
   waits, so a second worker also works as a standby.

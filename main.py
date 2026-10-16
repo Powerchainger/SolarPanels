@@ -4,9 +4,11 @@ Boot sequence:
   1. Load config from environment.
   2. Connect to MongoDB, ensure indexes, probe the output API (exits
      before any lease is claimed if it is unreachable).
-  3. Claim leases under a per-process worker id (WORKER_ID or the hostname,
-     plus a random suffix). The sync job re-checks every minute, so accounts
-     added later, or left behind by a stopped worker, are picked up.
+  3. Register in the `workers` collection and claim up to this worker's
+     fair share of the accounts, under a per-process worker id (WORKER_ID
+     or the hostname, plus a random suffix). The sync job re-checks every
+     minute: it picks up accounts added later or left behind by a stopped
+     worker, and releases accounts beyond the share when workers join.
   4. Start heartbeat renewal coroutine.
   5. Set default executor for growattServer.to_thread calls.
   6. Build scheduler from claimed accounts.
@@ -38,9 +40,12 @@ from leases import (
     STALE_AFTER_RENEWALS,
     StaleLeases,
     claim_leases,
+    fair_share,
     heartbeat,
     new_worker_id,
+    register_worker,
     release_lease,
+    unregister_worker,
 )
 from scheduler.jobs import (
     RunningJobs,
@@ -91,10 +96,15 @@ async def _main() -> None:
         sys.exit(1)
 
     # --- Claim leases ---------------------------------------------------
+    # Registered first, so the fair share already counts this worker. A
+    # worker counts as alive as long as a stopped one's leases look live.
+    alive_within = STALE_AFTER_RENEWALS * settings.lease_renewal_interval
+    await register_worker(db, worker_id)
     claimed = await claim_leases(
         db,
         worker_id,
         ttl_multiplier=settings.lease_ttl_multiplier,
+        limit=await fair_share(db, alive_within=alive_within),
     )
 
     if claimed:
@@ -140,6 +150,8 @@ async def _main() -> None:
         http_client=http_client,
     )
 
+    running_jobs = RunningJobs(scheduler)
+
     add_sync_job(
         scheduler,
         claimed,
@@ -149,10 +161,10 @@ async def _main() -> None:
         http_client=http_client,
         worker_id=worker_id,
         ttl_multiplier=settings.lease_ttl_multiplier,
-        stale=StaleLeases(STALE_AFTER_RENEWALS * settings.lease_renewal_interval),
+        stale=StaleLeases(alive_within),
+        alive_within=alive_within,
+        running=running_jobs,
     )
-
-    running_jobs = RunningJobs(scheduler)
 
     # --- Heartbeat coroutine --------------------------------------------
     # Kept running during shutdown until in-flight jobs are done, so their
@@ -214,6 +226,13 @@ async def _main() -> None:
                     "could not release lease on %s::%s (it expires on its own): %r",
                     acct.provider, acct.account_id, result,
                 )
+        try:
+            await unregister_worker(db, worker_id)
+        except Exception as exc:
+            logger.error(
+                "could not unregister worker %s (counted for another %ss): %r",
+                worker_id, alive_within, exc,
+            )
 
     await shutdown_gracefully(
         scheduler=scheduler,

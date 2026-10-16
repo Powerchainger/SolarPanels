@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from db.models import ApiConfig, GrowattCredentials
+from tests.fake_mongo import fake_db
 from leases import (
     claim_account,
     claim_leases,
@@ -407,75 +408,6 @@ async def test_take_over_account_matches_the_stale_holder_and_expiry():
     assert kwargs["update"]["$set"]["lease"]["worker_id"] == "w-new"
 
 
-class FakeApiConfigs:
-    """In-memory api_configs supporting exactly the lease queries in leases.py.
-
-    Each call reads and writes one document without awaiting in between,
-    which is the per-document atomicity MongoDB gives find_one_and_update.
-    """
-
-    def __init__(self, docs: list[dict]) -> None:
-        self.docs = {d["_id"]: d for d in docs}
-
-    @staticmethod
-    def _get(doc: dict, path: str):
-        for part in path.split("."):
-            if not isinstance(doc, dict):
-                return None
-            doc = doc.get(part)
-        return doc
-
-    def _matches(self, doc: dict, flt: dict) -> bool:
-        for key, want in flt.items():
-            if key == "$or":
-                if not any(self._matches(doc, sub) for sub in want):
-                    return False
-                continue
-            have = self._get(doc, key)
-            if isinstance(want, dict) and "$lt" in want:
-                if have is None or not have < want["$lt"]:
-                    return False
-            elif have != want:
-                return False
-        return True
-
-    def _apply(self, doc: dict, update: dict) -> None:
-        for path, value in update["$set"].items():
-            *parents, last = path.split(".")
-            target = doc
-            for part in parents:
-                target = target[part]
-            target[last] = value
-
-    def find(self, flt: dict) -> FakeAsyncCursor:
-        import copy
-
-        return FakeAsyncCursor(
-            copy.deepcopy(d) for d in self.docs.values() if self._matches(d, flt)
-        )
-
-    async def find_one_and_update(self, filter: dict, update: dict):
-        doc = self.docs.get(filter["_id"])
-        if doc is None or not self._matches(doc, filter):
-            return None
-        before = {**doc}
-        self._apply(doc, update)
-        return before
-
-    async def update_one(self, filter: dict, update: dict):
-        doc = self.docs.get(filter["_id"])
-        ok = doc is not None and self._matches(doc, filter)
-        if ok:
-            self._apply(doc, update)
-        return MagicMock(modified_count=int(ok))
-
-
-def _fake_db(*docs: dict) -> MagicMock:
-    db = MagicMock()
-    db.api_configs = FakeApiConfigs(list(docs))
-    return db
-
-
 def _live_lease(holder: str) -> dict:
     return {"worker_id": holder, "expires_at": datetime.now(UTC) + timedelta(minutes=10)}
 
@@ -484,7 +416,7 @@ async def test_replicas_given_the_same_worker_id_do_not_share_leases():
     """The --scale bug: identical WORKER_IDs made every replica a holder."""
     from leases import new_worker_id
 
-    db = _fake_db(_make_config("growatt", "acc-1"), _make_config("growatt", "acc-2"))
+    db = fake_db(_make_config("growatt", "acc-1"), _make_config("growatt", "acc-2"))
     first, second = new_worker_id("worker-1"), new_worker_id("worker-1")
 
     held_first = await claim_leases(db, first, ttl_multiplier=2)
@@ -499,7 +431,7 @@ async def test_replicas_given_the_same_worker_id_do_not_share_leases():
 async def test_live_holder_keeps_its_lease_while_it_renews():
     from leases import StaleLeases
 
-    db = _fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-live")))
+    db = fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-live")))
     stale = StaleLeases(stale_after=0)
 
     for _ in range(3):
@@ -514,7 +446,7 @@ async def test_live_holder_keeps_its_lease_while_it_renews():
 async def test_stopped_holder_is_taken_over_by_exactly_one_of_several_workers():
     from leases import StaleLeases
 
-    db = _fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-dead")))
+    db = fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-dead")))
     stales = {w: StaleLeases(stale_after=0) for w in ("w-b", "w-c", "w-d")}
 
     # First sighting: nobody acts yet. The holder does not renew.
@@ -537,7 +469,92 @@ async def test_stopped_holder_is_taken_over_by_exactly_one_of_several_workers():
 
 async def test_takeover_is_not_attempted_without_a_stale_tracker():
     """Boot claims only free accounts; takeovers need sightings across sync runs."""
-    db = _fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-dead")))
+    db = fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-dead")))
 
     for _ in range(3):
         assert await claim_leases(db, "w-new", ttl_multiplier=2) == []
+
+
+# ---------------------------------------------------------------------------
+# Worker registry and fair share
+# ---------------------------------------------------------------------------
+
+
+async def test_fair_share_divides_enabled_accounts_over_live_workers():
+    from leases import fair_share, register_worker
+
+    db = fake_db(
+        *(_make_config("growatt", f"acc-{i}") for i in range(10)),
+        _make_config("growatt", "off", enabled=False),
+    )
+    for w in ("w-a", "w-b", "w-c"):
+        await register_worker(db, w)
+    db.workers.docs["w-gone"] = {"_id": "w-gone", "last_seen": datetime.now(UTC) - timedelta(hours=1)}
+
+    assert await fair_share(db, alive_within=90) == 4  # ceil(10 / 3); w-gone not counted
+
+
+async def test_unregistered_worker_no_longer_counts():
+    from leases import fair_share, register_worker, unregister_worker
+
+    db = fake_db(*(_make_config("growatt", f"acc-{i}") for i in range(4)))
+    await register_worker(db, "w-a")
+    await register_worker(db, "w-b")
+    await unregister_worker(db, "w-b")
+
+    assert await fair_share(db, alive_within=90) == 4
+
+
+async def test_claim_leases_stops_at_the_limit_counting_held_accounts_first():
+    db = fake_db(
+        _make_config("growatt", "free-1"),
+        _make_config("growatt", "free-2"),
+        _make_config("growatt", "mine", lease=_live_lease("w-a")),
+    )
+
+    held = await claim_leases(db, "w-a", ttl_multiplier=2, limit=2)
+
+    # "mine" comes last in the scan but counts first: one free account fits.
+    assert len(held) == 2
+    assert "mine" in {a.account_id for a in held}
+
+
+async def test_claim_leases_returns_held_accounts_beyond_the_limit():
+    """The sync job releases the surplus; claim_leases must not hide it."""
+    db = fake_db(*(_make_config("growatt", f"acc-{i}", lease=_live_lease("w-a")) for i in range(3)))
+
+    assert len(await claim_leases(db, "w-a", ttl_multiplier=2, limit=1)) == 3
+
+
+async def test_takeover_waits_for_room_but_keeps_watching():
+    from leases import StaleLeases
+
+    db = fake_db(
+        _make_config("growatt", "mine", lease=_live_lease("w-a")),
+        _make_config("growatt", "orphan", lease=_live_lease("w-dead")),
+    )
+    stale = StaleLeases(stale_after=0)
+
+    await claim_leases(db, "w-a", ttl_multiplier=2, stale=stale, limit=1)
+    held = await claim_leases(db, "w-a", ttl_multiplier=2, stale=stale, limit=1)
+    assert {a.account_id for a in held} == {"mine"}  # stale, but no room
+
+    # Room appears (another worker left): the orphan is already known stale.
+    held = await claim_leases(db, "w-a", ttl_multiplier=2, stale=stale, limit=2)
+    assert {a.account_id for a in held} == {"mine", "orphan"}
+
+
+async def test_heartbeat_registers_the_worker_each_tick():
+    db = fake_db()
+    stop = asyncio.Event()
+
+    async def stop_soon():
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    await asyncio.gather(
+        heartbeat(db, "w-a", [], ttl_multiplier=2, renewal_interval=1, stop_event=stop),
+        stop_soon(),
+    )
+
+    assert "w-a" in db.workers.docs

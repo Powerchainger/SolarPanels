@@ -116,6 +116,7 @@ MongoDB database `solar_scraper`, models in `db/models.py`:
 |---|---|
 | `api_configs` | One document per account, `_id = "<provider>::<account_id>"`. Credentials (secret fields Fernet-encrypted, see `crypto.py`), interval, lease, provider cache, health fields. Written by `manage_keys.py` and the service. |
 | `raw_responses` | Verbatim provider responses, deleted after `RAW_TTL_DAYS`. |
+| `workers` | One document per running worker, `_id` = its worker id, `last_seen` refreshed by the heartbeat. Counted for the fair share; removed on a clean stop, otherwise after a day (TTL index). |
 | `processed_results` | One document per output record: the record itself (also the POST body), status, `retry_count`, `last_error`. Delivered (`posted`) records expire `POSTED_TTL_DAYS` after `created_at` (partial TTL index `posted_ttl`); undelivered ones are kept. |
 
 `seeded_at` is set only by `manage_keys.py`. Writes made by the service
@@ -148,6 +149,29 @@ in line: it adds jobs for newly held accounts, reschedules changed
 intervals, and removes jobs for accounts no longer held. That is what makes
 account changes apply without a restart, and lets an idle worker take over
 from a dead one.
+
+### Load balancing
+
+Each worker claims at most its fair share, `ceil(enabled accounts / live
+workers)` (`leases.fair_share`). A worker is live if its `workers` document
+was refreshed within `STALE_AFTER_RENEWALS` renewal intervals; it registers
+before its boot claim, so the boot claim already counts it. When a worker
+holds more than its share, the sync job releases the surplus
+(`_release_surplus`): never an account whose fetch is running, and the ones
+with the latest next run first, because their new holder resumes the rhythm
+from `last_fetch_at` and so skips no cycle. The fetch job is removed before
+the lease is released. Another worker claims a released account on its
+next sync run, so it is unheld for about a minute.
+
+The share counts accounts, not calls per hour: a 6-minute Growatt account
+and an hourly EnPhase account weigh the same. Weighting by `3600 /
+interval_seconds` would balance provider calls instead; it is not done
+because at the current mix and scale the difference does not matter.
+
+It is not exact: workers starting at the same moment can briefly
+over-claim before they see each other, a crashed worker still counts as live
+for up to 90 s, and nothing rebalances by load within the share.
+Each converges on the next sync runs.
 
 ## Health check
 

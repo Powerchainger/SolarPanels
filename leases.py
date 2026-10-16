@@ -12,12 +12,19 @@ Lease TTL is per-account: `interval_seconds * lease_ttl_multiplier`.
 
 The worker id is unique per process (`new_worker_id`), so two processes never
 treat the same lease as their own, whatever WORKER_ID they were given.
+
+Load balancing: each worker records itself in the `workers` collection on
+every heartbeat and claims at most its fair share of the enabled accounts,
+`ceil(enabled / live workers)` (`fair_share`). The sync job releases what a
+worker holds beyond that, so accounts spread out when workers are added.
+Balanced by account count, not by calls per hour.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import secrets
 import socket
 from datetime import UTC, datetime, timedelta
@@ -83,6 +90,44 @@ def _doc_id(provider: str, account_id: str) -> str:
 def _lease_expiry(interval_seconds: int, ttl_multiplier: int) -> datetime:
     """Compute lease expiry from account interval and TTL multiplier."""
     return datetime.now(UTC) + timedelta(seconds=interval_seconds * ttl_multiplier)
+
+
+async def register_worker(db: AsyncDatabase, worker_id: str) -> None:
+    """Record that this worker is alive (every heartbeat tick, and at boot)."""
+    await db.workers.update_one(
+        {"_id": worker_id},
+        {"$set": {"last_seen": datetime.now(UTC)}},
+        upsert=True,
+    )
+
+
+async def unregister_worker(db: AsyncDatabase, worker_id: str) -> None:
+    """Drop this worker from the registry (graceful shutdown)."""
+    await db.workers.delete_one({"_id": worker_id})
+
+
+async def fair_share(db: AsyncDatabase, *, alive_within: float) -> int:
+    """How many accounts one worker should hold: ceil(enabled / live workers).
+
+    A worker is live if it registered within `alive_within` seconds. The
+    caller has registered itself first, so the count is at least one.
+    """
+    since = datetime.now(UTC) - timedelta(seconds=alive_within)
+    workers = await db.workers.count_documents({"last_seen": {"$gte": since}})
+    enabled = await db.api_configs.count_documents({"enabled": True})
+    return math.ceil(enabled / max(workers, 1))
+
+
+def _held_by(lease: dict[str, Any] | None, worker_id: str, now: datetime) -> bool:
+    """Whether `lease` is an unexpired lease of `worker_id`."""
+    if not lease or lease.get("worker_id") != worker_id:
+        return False
+    expires_at = lease.get("expires_at")
+    if not isinstance(expires_at, datetime):
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at > now
 
 
 async def claim_account(
@@ -179,20 +224,26 @@ async def claim_leases(
     *,
     ttl_multiplier: int,
     stale: StaleLeases | None = None,
+    limit: int | None = None,
 ) -> list[ApiConfig]:
     """Claim all unclaimed/expired accounts and return the ones this worker holds.
 
     Iterates over all enabled api_configs, attempting an atomic claim for each.
     Returns the accounts claimed now plus those this worker already held.
     With `stale`, live leases of other workers are watched across calls and
-    taken over once their holder has stopped renewing them.
+    taken over once their holder has stopped renewing them. With `limit`, new
+    claims and takeovers stop once this worker holds that many; accounts it
+    already holds are always returned, even beyond the limit.
     """
     now = datetime.now(UTC)
     claimed: list[ApiConfig] = []
     foreign: set[str] = set()
 
-    cursor = db.api_configs.find({"enabled": True})
-    async for raw_doc in cursor:
+    docs = [d async for d in db.api_configs.find({"enabled": True})]
+    owned = sum(1 for d in docs if _held_by(d.get("lease"), worker_id, now))
+    room = math.inf if limit is None else limit - owned
+
+    for raw_doc in docs:
         doc_id = raw_doc.get("_id", "")
         # Parse lease to check current state.
         current_lease = raw_doc.get("lease")
@@ -212,6 +263,8 @@ async def claim_leases(
                             doc_id, owner, expires_at, now
                         ):
                             continue
+                        if room <= 0:
+                            continue
                         ok = await take_over_account(
                             db, raw_doc.get("provider", ""), raw_doc.get("account_id", ""),
                             worker_id,
@@ -221,6 +274,7 @@ async def claim_leases(
                             ttl_multiplier=ttl_multiplier,
                         )
                         if ok:
+                            room -= 1
                             raw_doc.pop("_id", None)
                             try:
                                 claimed.append(ApiConfig(**raw_doc))
@@ -237,6 +291,8 @@ async def claim_leases(
                         logger.exception("failed to parse owned api_config %s", doc_id)
                     continue
 
+        if room <= 0:
+            continue
         provider = raw_doc.get("provider", "")
         account_id = raw_doc.get("account_id", "")
         interval_seconds = raw_doc.get("interval_seconds", 300)
@@ -247,6 +303,7 @@ async def claim_leases(
             ttl_multiplier=ttl_multiplier,
         )
         if ok:
+            room -= 1
             raw_doc.pop("_id", None)
             try:
                 claimed.append(ApiConfig(**raw_doc))
@@ -345,6 +402,10 @@ async def heartbeat(
                 Path(alive_file).touch()
             except OSError:
                 logger.warning("could not touch %s; health check will fail", alive_file)
+        try:
+            await register_worker(db, worker_id)
+        except Exception:
+            logger.exception("could not register worker %s", worker_id)
         # Mutating `accounts` while iterating it would skip the account after
         # each removal, so collect the lost ones and drop them after the loop.
         lost: list[ApiConfig] = []

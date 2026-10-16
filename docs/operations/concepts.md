@@ -67,8 +67,10 @@ in brackets.
 **Lease** (claim, lost lease)
 :   A worker's reservation of an account, stored on the account in MongoDB,
     so that each account is polled by exactly one worker. A worker
-    **claims** every enabled account that has no lease or whose lease has
-    expired. Leases are released when a worker stops cleanly.
+    **claims** enabled accounts that have no lease or whose lease has
+    expired, up to its fair share: the number of enabled accounts divided
+    by the number of running workers, rounded up. Leases are released when
+    a worker stops cleanly.
 
 **Heartbeat** (lease renewal)
 :   Every `LEASE_RENEWAL_INTERVAL` seconds (30), a worker extends the leases
@@ -80,10 +82,11 @@ in brackets.
     health check.
 
 **Sync** (sync job)
-:   Every minute, a worker claims any free accounts and updates its
-    schedule to match: new and re-enabled accounts start, changed intervals
-    apply, and deleted, disabled or lost accounts stop. This is why account
-    changes need no restart.
+:   Every minute, a worker claims free accounts up to its fair share,
+    releases accounts beyond it (so a newly started worker gets some), and
+    updates its schedule to match: new and re-enabled accounts start,
+    changed intervals apply, and deleted, disabled, lost or released
+    accounts stop. This is why account changes need no restart.
 
 ## Growatt
 

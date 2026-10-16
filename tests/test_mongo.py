@@ -19,6 +19,7 @@ def _db(raw_indexes: dict | None = None, pr_indexes: dict | None = None) -> Magi
     db = MagicMock()
     db.raw_responses = _coll(raw_indexes or {"_id_": {}})
     db.processed_results = _coll(pr_indexes or {"_id_": {}})
+    db.workers = _coll({"_id_": {}})
     return db
 
 

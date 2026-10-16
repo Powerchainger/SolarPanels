@@ -8,6 +8,8 @@ Collections:
   raw_responses      Verbatim API bodies. TTL index deletes after RAW_TTL_DAYS.
   processed_results  One doc per output record. Status index for flush-job queries;
                      posted records expire after POSTED_TTL_DAYS.
+  workers            One doc per running worker, `last_seen` set by its heartbeat.
+                     Counted for the fair share; crashed workers' docs expire.
 """
 
 from __future__ import annotations
@@ -25,7 +27,11 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 logger = logging.getLogger(__name__)
 
-COLLECTIONS = ["api_configs", "raw_responses", "processed_results"]
+COLLECTIONS = ["api_configs", "raw_responses", "processed_results", "workers"]
+
+# Removes a crashed worker's registry doc. Only housekeeping: liveness is
+# judged by `last_seen` age, so the exact value does not matter.
+WORKERS_TTL_SECONDS = 86400
 
 TTL_INDEX = "created_at_1"  # MongoDB's default name for the raw_responses TTL index
 POSTED_TTL_INDEX = "posted_ttl"  # processed_results: deletes delivered records
@@ -84,6 +90,7 @@ async def init_indexes(
                                     posted_ttl_days; none if infinite)
       processed_results.status+retry_count  Compound for flush-job selector
       processed_results.last_attempt_at     For stale-posting reclamation
+      workers.last_seen   TTL (WORKERS_TTL_SECONDS), counted by fair_share
     """
     await _ensure_ttl_index(db.raw_responses, TTL_INDEX, ttl_days * 86400)
 
@@ -97,6 +104,7 @@ async def init_indexes(
     )
     await pr.create_index([("status", ASCENDING), ("retry_count", ASCENDING)])
     await pr.create_index("last_attempt_at")
+    await db.workers.create_index("last_seen", expireAfterSeconds=WORKERS_TTL_SECONDS)
 
     logger.info(
         "MongoDB indexes ensured (raw TTL=%dd, posted TTL=%s)",

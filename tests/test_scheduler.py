@@ -794,3 +794,126 @@ async def test_sync_keeps_unchanged_job():
         assert sched.get_job("fetch::growatt::acc-1").next_run_time == before
     finally:
         sched.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Load balancing across workers
+# ---------------------------------------------------------------------------
+
+
+def _account_doc(account_id: str) -> dict:
+    return {
+        "_id": f"growatt::{account_id}",
+        "provider": "growatt",
+        "account_id": account_id,
+        "interval_seconds": 360,
+        "enabled": True,
+        "credentials": {"provider": "growatt", "api_token": "tok"},
+        "store_raw": True,
+        "lease": None,
+    }
+
+
+class _Worker:
+    """One simulated worker: its own scheduler, held accounts and stale tracker."""
+
+    def __init__(self, db, worker_id: str) -> None:
+        from leases import StaleLeases
+        from scheduler.jobs import build_scheduler
+
+        self.db, self.id = db, worker_id
+        self.claimed: list[ApiConfig] = []
+        self.stale = StaleLeases(stale_after=90)
+        self.sched = build_scheduler([])
+        self.sched.start(paused=True)
+
+    async def sync(self) -> None:
+        from leases import register_worker
+        from scheduler.jobs import sync_accounts_job
+
+        await register_worker(self.db, self.id)  # what its heartbeat does
+        await sync_accounts_job(
+            self.sched, self.claimed, self.db, "https://x.com", "", MagicMock(),
+            worker_id=self.id, ttl_multiplier=2, stale=self.stale, alive_within=90,
+        )
+
+    async def stop(self) -> None:
+        from leases import release_lease, unregister_worker
+
+        for acct in self.claimed:
+            await release_lease(self.db, acct.provider, acct.account_id, self.id)
+        await unregister_worker(self.db, self.id)
+        self.sched.shutdown(wait=False)
+
+
+def _holders(db) -> dict[str, str | None]:
+    return {
+        doc_id: (doc["lease"] or {}).get("worker_id")
+        for doc_id, doc in db.api_configs.docs.items()
+    }
+
+
+async def test_accounts_spread_out_when_workers_join_and_leave():
+    from tests.fake_mongo import fake_db
+
+    db = fake_db(*(_account_doc(f"acc-{i}") for i in range(10)))
+    a, b, c = _Worker(db, "w-a"), _Worker(db, "w-b"), _Worker(db, "w-c")
+    workers = [a, b, c]
+    try:
+        await a.sync()
+        assert len(a.claimed) == 10  # alone: everything
+
+        for _ in range(2):
+            for w in workers:
+                await w.sync()
+
+        assert sorted(len(w.claimed) for w in workers) == [2, 4, 4]
+        holders = _holders(db)
+        assert None not in holders.values()  # nothing left unpolled
+        for w in workers:
+            # Each worker's fetch jobs are exactly the accounts its leases name.
+            assert _fetch_job_ids(w.sched) == {
+                f"fetch::{doc_id}" for doc_id, h in holders.items() if h == w.id
+            }
+
+        # Settled: another round moves nothing.
+        for w in workers:
+            await w.sync()
+        assert _holders(db) == holders
+
+        # One leaves cleanly: the others share its accounts.
+        await c.stop()
+        workers.remove(c)
+        for w in workers:
+            await w.sync()
+        assert sorted(len(w.claimed) for w in workers) == [5, 5]
+        assert None not in _holders(db).values()
+    finally:
+        for w in workers:
+            w.sched.shutdown(wait=False)
+
+
+async def test_release_surplus_skips_running_fetches_and_prefers_latest_next_run():
+    from scheduler.jobs import _release_surplus, add_account_jobs, build_scheduler
+    from tests.fake_mongo import fake_db
+
+    db = fake_db()
+    sched = build_scheduler([])
+    sched.start(paused=True)
+    try:
+        accts = [_make_growatt_config(name) for name in ("running", "soon", "later")]
+        add_account_jobs(sched, accts, db, "https://x.com", "", MagicMock())
+        now = datetime.now(UTC)
+        sched.modify_job("fetch::growatt::running", next_run_time=now + timedelta(minutes=9))
+        sched.modify_job("fetch::growatt::soon", next_run_time=now + timedelta(minutes=1))
+        sched.modify_job("fetch::growatt::later", next_run_time=now + timedelta(minutes=5))
+        running = MagicMock(job_ids=MagicMock(return_value=["fetch::growatt::running"]))
+
+        with patch("scheduler.jobs.release_lease", new_callable=AsyncMock) as release:
+            kept = await _release_surplus(sched, accts, 2, db, "w-a", running)
+
+        assert [a.account_id for a in kept] == ["running", "soon"]
+        release.assert_awaited_once_with(db, "growatt", "later", "w-a")
+        assert sched.get_job("fetch::growatt::later") is None
+    finally:
+        sched.shutdown(wait=False)

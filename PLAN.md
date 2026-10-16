@@ -191,8 +191,10 @@ The system is designed for **multiple worker machines**, each responsible for a 
 > **Superseded in part** (2026-10-16): the lease's `worker_id` is unique per
 > process (`WORKER_ID` or the hostname, plus a random suffix), and a lease
 > whose holder stopped renewing it is taken over after three renewal
-> intervals instead of waiting for it to expire. See
-> `docs/technical/architecture.md#leases`.
+> intervals instead of waiting for it to expire. Workers no longer claim
+> every free lease: each claims up to `ceil(enabled / live workers)` and
+> releases the surplus, with live workers counted in a `workers`
+> collection. See `docs/technical/architecture.md#leases`.
 
 **Failure buffering: central MongoDB, not per-machine.** `processed_results` stays in the central DB (as already planned). Reasons:
 - Any worker — or a future dedicated flush worker — can retry any account's failures, not just the one that created them.

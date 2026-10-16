@@ -103,6 +103,7 @@ plus anything that goes wrong. Things worth noticing:
 | `record … exhausted retries (5), stays failed` | A record will not be retried any more. |
 | `flush: retried 12 record(s)` | The [retry job](concepts.md#records-and-delivery) delivered or retried earlier records. |
 | `lost lease on …` | Another worker took over this account, or it was deleted. See [Concepts](concepts.md#workers). |
+| `released … account(s) to balance load` | Another worker started; this one handed over the accounts beyond its fair share. See [Scaling](maintenance.md#scaling-to-more-workers). |
 
 Set `LOG_LEVEL=DEBUG` in `.env` and restart to also see every API call. This
 is verbose and meant for short troubleshooting sessions.

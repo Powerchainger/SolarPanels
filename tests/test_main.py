@@ -65,6 +65,9 @@ def _patched_main(mock_settings, mock_account):
         patch("main.Settings", return_value=mock_settings),
         patch("main.get_db", new_callable=AsyncMock),
         patch("main.new_worker_id", return_value="test-worker"),
+        patch("main.register_worker", new_callable=AsyncMock) as register,
+        patch("main.unregister_worker", new_callable=AsyncMock) as unregister,
+        patch("main.fair_share", new_callable=AsyncMock, return_value=10) as share,
         patch("main.init_indexes", new_callable=AsyncMock),
         patch("main.claim_leases", new_callable=AsyncMock, return_value=[mock_account]) as claim,
         patch("main.build_scheduler", return_value=mock_scheduler) as build,
@@ -82,6 +85,7 @@ def _patched_main(mock_settings, mock_account):
             handlers=handlers, scheduler=mock_scheduler, claim=claim, build=build, probe=probe,
             add_jobs=add_jobs, add_flush=add_flush, add_sync=add_sync,
             release=release, shutdown=shutdown,
+            register=register, unregister=unregister, share=share,
         )
 
 
@@ -92,6 +96,8 @@ async def test_main_claims_leases(mock_settings, mock_account):
         await _main()
 
     m.claim.assert_called_once()
+    m.register.assert_awaited_once()  # before the claim, so the share counts us
+    assert m.claim.call_args.kwargs["limit"] == 10
     m.build.assert_called_once_with([mock_account])
     m.add_jobs.assert_called_once()
     m.add_flush.assert_called_once()
@@ -146,6 +152,7 @@ async def test_main_signal_runs_graceful_shutdown(mock_settings, mock_account):
         m.release.assert_awaited_once_with(
             m.release.call_args.args[0], "growatt", "test-acct", "test-worker"
         )
+        m.unregister.assert_awaited_once_with(m.release.call_args.args[0], "test-worker")
 
 
 @pytest.mark.asyncio
@@ -154,10 +161,12 @@ async def test_main_release_failure_does_not_stop_other_releases(mock_settings, 
     with _patched_main(mock_settings, mock_account) as m:
         m.claim.return_value = [mock_account, other]
         m.release.side_effect = [RuntimeError("mongo down"), None]
+        m.unregister.side_effect = RuntimeError("mongo down")
         await _main()
         await m.shutdown.call_args.kwargs["release_leases"]()  # must not raise
 
     assert m.release.await_count == 2
+    m.unregister.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

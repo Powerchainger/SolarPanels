@@ -41,7 +41,7 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 from clients.base import AuthFailedError, TimedClient
 from clients.output import post_record
-from leases import StaleLeases, claim_leases
+from leases import StaleLeases, claim_leases, fair_share, release_lease
 from db.models import (
     ApiConfig,
     ProcessedRecord,
@@ -657,12 +657,16 @@ async def sync_accounts_job(
     worker_id: str,
     ttl_multiplier: int,
     stale: StaleLeases | None = None,
+    alive_within: float | None = None,
+    running: RunningJobs | None = None,
 ) -> None:
     """Bring this worker's fetch jobs in line with the leases it can hold.
 
-    Claims every free enabled account and, with `stale`, takes over those
-    whose holder stopped renewing (claim_leases also returns the ones this
-    worker already holds), then:
+    Claims free enabled accounts and, with `stale`, takes over those whose
+    holder stopped renewing (claim_leases also returns the ones this worker
+    already holds). With `alive_within`, claims stop at this worker's fair
+    share and accounts held beyond it are released (`_release_surplus`).
+    Then:
       - adds a fetch job for each newly held account,
       - reschedules a job whose account interval changed,
       - removes fetch jobs for accounts no longer held (deleted, disabled,
@@ -671,7 +675,14 @@ async def sync_accounts_job(
     `claimed` is replaced in place: the heartbeat renews and shutdown
     releases exactly what is in it.
     """
-    held = await claim_leases(db, worker_id, ttl_multiplier=ttl_multiplier, stale=stale)
+    limit = None
+    if alive_within is not None:
+        limit = await fair_share(db, alive_within=alive_within)
+    held = await claim_leases(
+        db, worker_id, ttl_multiplier=ttl_multiplier, stale=stale, limit=limit,
+    )
+    if limit is not None and len(held) > limit:
+        held = await _release_surplus(scheduler, held, limit, db, worker_id, running)
     held_ids = {_fetch_job_id(a): a for a in held}
 
     for job_id, acct in held_ids.items():
@@ -695,6 +706,49 @@ async def sync_accounts_job(
     claimed[:] = held
 
 
+async def _release_surplus(
+    scheduler: AsyncIOScheduler,
+    held: list[ApiConfig],
+    limit: int,
+    db: AsyncDatabase,
+    worker_id: str,
+    running: RunningJobs | None,
+) -> list[ApiConfig]:
+    """Release the accounts held beyond `limit`; return the ones kept.
+
+    Never releases an account whose fetch is running. Releases the ones with
+    the latest next run first: their new holder resumes the rhythm from
+    `last_fetch_at` (first_run_at), so the handover skips no cycle. The fetch
+    job goes before the lease, so no fetch starts on a released account.
+    """
+    busy = set(running.job_ids()) if running else set()
+    never = datetime.max.replace(tzinfo=UTC)
+
+    def next_run(acct: ApiConfig) -> datetime:
+        job = scheduler.get_job(_fetch_job_id(acct))
+        return job.next_run_time if job and job.next_run_time else never
+
+    candidates = sorted(
+        (a for a in held if _fetch_job_id(a) not in busy), key=next_run, reverse=True,
+    )
+    release = candidates[: len(held) - limit]
+    for acct in release:
+        job_id = _fetch_job_id(acct)
+        if scheduler.get_job(job_id) is not None:
+            scheduler.remove_job(job_id)
+        try:
+            await release_lease(db, acct.provider, acct.account_id, worker_id)
+        except Exception:
+            # Unrenewed from now on, so another worker takes it over anyway.
+            logger.exception("could not release %s while balancing", job_id)
+    if release:
+        logger.info(
+            "released %d account(s) to balance load (fair share %d): %s",
+            len(release), limit, ", ".join(_fetch_job_id(a) for a in release),
+        )
+    return [a for a in held if not any(a is r for r in release)]
+
+
 def add_sync_job(
     scheduler: AsyncIOScheduler,
     claimed: list[ApiConfig],
@@ -706,6 +760,8 @@ def add_sync_job(
     worker_id: str,
     ttl_multiplier: int,
     stale: StaleLeases | None = None,
+    alive_within: float | None = None,
+    running: RunningJobs | None = None,
     sync_interval: int = DEFAULT_SYNC_INTERVAL_SECONDS,
 ) -> None:
     """Add the periodic lease re-claim job (see `sync_accounts_job`).
@@ -727,6 +783,8 @@ def add_sync_job(
             "worker_id": worker_id,
             "ttl_multiplier": ttl_multiplier,
             "stale": stale,
+            "alive_within": alive_within,
+            "running": running,
         },
         max_instances=1,
         coalesce=True,
