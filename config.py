@@ -10,15 +10,16 @@ Required variables (the service will refuse to start if any are missing):
     MONGO_URI        Connection string for the central MongoDB instance, e.g.
                      mongodb://localhost:27017 or a replica-set/Atlas SRV URI.
     OUTPUT_API_URL   Base URL of the external API that receives processed records.
-    WORKER_ID        Unique identifier for this worker instance, e.g. "worker-1".
-                     Used for lease ownership — every running container must have
-                     a distinct value.
     ENCRYPTION_KEY    Fernet key for encrypting credentials at rest. Generate
                      with `openssl rand -base64 32`. The service refuses to
                      start without a valid key; a lost key makes stored
                      credentials unrecoverable (back it up).
 
 Optional variables (defaults shown):
+    WORKER_ID         Readable name for this worker, e.g. "worker-1". The lease
+                      owner id is this name (or the hostname, if empty) plus a
+                      random suffix per process, so replicas sharing a name
+                      still hold separate leases. (default: "")
     OUTPUT_API_TOKEN  Bearer token for the output API. Leave empty if the API
                       requires no authentication. (default: "")
     LOG_LEVEL         Python logging level: DEBUG, INFO, WARNING, ERROR.
@@ -76,7 +77,7 @@ class Settings(BaseSettings):
     # 2**31 - 1 seconds (~68 years), so a finite value must stay below that.
     posted_ttl_days: float = Field(default=7, gt=0)
     threadpool_workers: int = 32
-    worker_id: str
+    worker_id: str = ""
     lease_ttl_multiplier: int = 2
     lease_renewal_interval: int = 30
     shutdown_timeout_seconds: float = Field(default=50, gt=0)

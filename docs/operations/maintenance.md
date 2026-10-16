@@ -132,26 +132,25 @@ Then update `MONGO_APP_PASSWORD` and `MONGO_URI` in `.env` and run
 A single [worker](concepts.md#workers) comfortably handles dozens of
 accounts. More workers only become useful for hundreds of accounts.
 
-The service can run as several workers, each with its own `WORKER_ID`,
-sharing one MongoDB. Each account is then polled by exactly one worker,
-which holds its [lease](concepts.md#workers). This requires MongoDB to be
-reachable by all workers, which the provided Compose setup does not allow
-(MongoDB only listens on `127.0.0.1`), so it needs a separate MongoDB
-deployment.
+The service can run as several workers sharing one MongoDB. Each account
+is then polled by exactly one worker, which holds its
+[lease](concepts.md#workers). On one machine, start more workers with
+`podman compose up -d --scale app=2`; they reach MongoDB over the Compose
+network. Workers on other machines need MongoDB to be reachable from
+there, which the provided Compose setup does not allow (MongoDB only
+listens on `127.0.0.1`), so they need a separate MongoDB deployment.
 
 How accounts are divided:
 
 - Every minute, each worker claims any account that no other running worker
   holds. Which worker gets a new account is first come, first served;
   accounts are not rebalanced between workers.
-- If a worker dies, its leases expire after *poll interval ×
-  `LEASE_TTL_MULTIPLIER`* and another worker claims the accounts within a
-  minute after that. A worker that holds nothing simply waits, so a second
-  worker also works as a standby.
-- Each worker needs its own `WORKER_ID`. Don't use
-  `podman compose up --scale app=2`: the replicas would share one
-  `WORKER_ID`, each would consider itself the holder of every lease, and
-  every account would be polled once per replica.
+- If a worker dies, its heartbeat stops, and another worker takes over its
+  accounts within about three minutes. A worker that holds nothing simply
+  waits, so a second worker also works as a standby.
+- Workers may share a `WORKER_ID`: each adds a random suffix to it at
+  start, so their leases stay separate. A distinct `WORKER_ID` per worker
+  only makes the logs easier to read.
 - Retries are coordinated: each record is reserved before it is sent, so
   workers don't deliver the same record at the same time. As with a single
   worker, a crash between sending a record and recording that it was sent

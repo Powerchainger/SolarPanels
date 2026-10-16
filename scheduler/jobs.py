@@ -41,7 +41,7 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 from clients.base import AuthFailedError, TimedClient
 from clients.output import post_record
-from leases import claim_leases
+from leases import StaleLeases, claim_leases
 from db.models import (
     ApiConfig,
     ProcessedRecord,
@@ -656,11 +656,13 @@ async def sync_accounts_job(
     *,
     worker_id: str,
     ttl_multiplier: int,
+    stale: StaleLeases | None = None,
 ) -> None:
     """Bring this worker's fetch jobs in line with the leases it can hold.
 
-    Claims every free enabled account (claim_leases also returns the ones
-    this worker already holds), then:
+    Claims every free enabled account and, with `stale`, takes over those
+    whose holder stopped renewing (claim_leases also returns the ones this
+    worker already holds), then:
       - adds a fetch job for each newly held account,
       - reschedules a job whose account interval changed,
       - removes fetch jobs for accounts no longer held (deleted, disabled,
@@ -669,7 +671,7 @@ async def sync_accounts_job(
     `claimed` is replaced in place: the heartbeat renews and shutdown
     releases exactly what is in it.
     """
-    held = await claim_leases(db, worker_id, ttl_multiplier=ttl_multiplier)
+    held = await claim_leases(db, worker_id, ttl_multiplier=ttl_multiplier, stale=stale)
     held_ids = {_fetch_job_id(a): a for a in held}
 
     for job_id, acct in held_ids.items():
@@ -703,9 +705,13 @@ def add_sync_job(
     *,
     worker_id: str,
     ttl_multiplier: int,
+    stale: StaleLeases | None = None,
     sync_interval: int = DEFAULT_SYNC_INTERVAL_SECONDS,
 ) -> None:
-    """Add the periodic lease re-claim job (see `sync_accounts_job`)."""
+    """Add the periodic lease re-claim job (see `sync_accounts_job`).
+
+    `stale` must outlive the job's runs: it remembers what each run saw.
+    """
     scheduler.add_job(
         sync_accounts_job,
         trigger=IntervalTrigger(seconds=sync_interval),
@@ -720,6 +726,7 @@ def add_sync_job(
             "http_client": http_client,
             "worker_id": worker_id,
             "ttl_multiplier": ttl_multiplier,
+            "stale": stale,
         },
         max_instances=1,
         coalesce=True,

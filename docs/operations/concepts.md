@@ -57,7 +57,9 @@ in brackets.
 ## Workers
 
 **Worker**
-:   One running copy of the service, named by `WORKER_ID`. A normal
+:   One running copy of the service. Its name is `WORKER_ID` (or the
+    container's hostname) plus a random suffix chosen at each start, e.g.
+    `worker-1-3f9a0c2e`, so two workers never share a name. A normal
     installation has one worker. Several workers can share one MongoDB to
     divide the accounts between them; see
     [Scaling](maintenance.md#scaling-to-more-workers).
@@ -71,8 +73,9 @@ in brackets.
 **Heartbeat** (lease renewal)
 :   Every `LEASE_RENEWAL_INTERVAL` seconds (30), a worker extends the leases
     it holds to *poll interval × `LEASE_TTL_MULTIPLIER`* from now. If a
-    worker crashes, its leases are not extended, expire, and another worker
-    can claim the accounts. `lost lease on …` in the logs means another
+    worker crashes, its leases are no longer extended. Another worker, or
+    the restarted one, notices within about three minutes and takes the
+    accounts over; at the latest they become free when the leases expire. `lost lease on …` in the logs means another
     worker now holds that account. The heartbeat also feeds the container
     health check.
 

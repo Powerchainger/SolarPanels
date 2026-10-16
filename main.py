@@ -4,8 +4,9 @@ Boot sequence:
   1. Load config from environment.
   2. Connect to MongoDB, ensure indexes, probe the output API (exits
      before any lease is claimed if it is unreachable).
-  3. Claim leases for this WORKER_ID (re-checked every minute by the
-     sync job, so accounts added later are picked up without a restart).
+  3. Claim leases under a per-process worker id (WORKER_ID or the hostname,
+     plus a random suffix). The sync job re-checks every minute, so accounts
+     added later, or left behind by a stopped worker, are picked up.
   4. Start heartbeat renewal coroutine.
   5. Set default executor for growattServer.to_thread calls.
   6. Build scheduler from claimed accounts.
@@ -33,7 +34,14 @@ import httpx
 from config import Settings
 from healthcheck import ALIVE_FILE
 from db.mongo import get_db, init_indexes
-from leases import claim_leases, heartbeat, release_lease
+from leases import (
+    STALE_AFTER_RENEWALS,
+    StaleLeases,
+    claim_leases,
+    heartbeat,
+    new_worker_id,
+    release_lease,
+)
 from scheduler.jobs import (
     RunningJobs,
     add_account_jobs,
@@ -56,7 +64,8 @@ async def _main() -> None:
     # clients.output logs each POST outcome at INFO, so that line is noise.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    logger.info("Starting solar-scraper worker %s", settings.worker_id)
+    worker_id = new_worker_id(settings.worker_id)
+    logger.info("Starting solar-scraper worker %s", worker_id)
 
     # --- MongoDB --------------------------------------------------------
     db = await get_db(settings.mongo_uri)
@@ -84,7 +93,7 @@ async def _main() -> None:
     # --- Claim leases ---------------------------------------------------
     claimed = await claim_leases(
         db,
-        settings.worker_id,
+        worker_id,
         ttl_multiplier=settings.lease_ttl_multiplier,
     )
 
@@ -120,7 +129,7 @@ async def _main() -> None:
         output_base_url=output_base_url,
         output_token=output_token,
         http_client=http_client,
-        worker_id=settings.worker_id,
+        worker_id=worker_id,
     )
 
     add_flush_job(
@@ -138,8 +147,9 @@ async def _main() -> None:
         output_base_url=output_base_url,
         output_token=output_token,
         http_client=http_client,
-        worker_id=settings.worker_id,
+        worker_id=worker_id,
         ttl_multiplier=settings.lease_ttl_multiplier,
+        stale=StaleLeases(STALE_AFTER_RENEWALS * settings.lease_renewal_interval),
     )
 
     running_jobs = RunningJobs(scheduler)
@@ -151,7 +161,7 @@ async def _main() -> None:
     heartbeat_task = asyncio.create_task(
         heartbeat(
             db,
-            settings.worker_id,
+            worker_id,
             claimed,
             ttl_multiplier=settings.lease_ttl_multiplier,
             renewal_interval=settings.lease_renewal_interval,
@@ -193,7 +203,7 @@ async def _main() -> None:
         # lease is lost, replaced by the sync job (paused by now).
         results = await asyncio.gather(
             *(
-                release_lease(db, acct.provider, acct.account_id, settings.worker_id)
+                release_lease(db, acct.provider, acct.account_id, worker_id)
                 for acct in claimed
             ),
             return_exceptions=True,

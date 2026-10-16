@@ -61,7 +61,8 @@ Then fill in `.env`:
    Records are POSTed to `<OUTPUT_API_URL>/records`. The service checks that
    this URL is reachable when it starts, and stops if it is not.
 
-5. **`WORKER_ID`.** Keep `worker-1` for a single machine. See
+5. **`WORKER_ID`** (optional). A readable name for the worker, shown in the
+   logs; `worker-1` is fine. See
    [Scaling](maintenance.md#scaling-to-more-workers) if you run more than one.
 
 All settings are described in [Configuration](configuration.md).
@@ -106,7 +107,7 @@ podman compose logs -f app
 A healthy start looks like this:
 
 ```
-INFO solar-scraper: Starting solar-scraper worker worker-1
+INFO solar-scraper: Starting solar-scraper worker worker-1-3f9a0c2e
 INFO db.mongo: MongoDB indexes ensured (raw TTL=30d, posted TTL=7d)
 INFO leases: claimed account growatt::my-home (lease until 2026-10-14T12:20:00+00:00)
 INFO leases: claimed account enphase::office (lease until 2026-10-14T14:00:00+00:00)

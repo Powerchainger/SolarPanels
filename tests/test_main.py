@@ -64,6 +64,7 @@ def _patched_main(mock_settings, mock_account):
         patch("httpx.AsyncClient") as mock_httpx,
         patch("main.Settings", return_value=mock_settings),
         patch("main.get_db", new_callable=AsyncMock),
+        patch("main.new_worker_id", return_value="test-worker"),
         patch("main.init_indexes", new_callable=AsyncMock),
         patch("main.claim_leases", new_callable=AsyncMock, return_value=[mock_account]) as claim,
         patch("main.build_scheduler", return_value=mock_scheduler) as build,

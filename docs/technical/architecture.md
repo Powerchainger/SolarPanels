@@ -125,11 +125,23 @@ overwrite the new credentials.
 
 ## Leases
 
-Each account document has `lease = {worker_id, expires_at}`. At startup an
+Each account document has `lease = {worker_id, expires_at}`. The
+`worker_id` is unique per process: `WORKER_ID` (or the hostname) plus a
+random suffix (`leases.new_worker_id`), so replicas started with the same
+`WORKER_ID` never treat each other's leases as their own. At startup a
 worker claims every enabled account whose lease is empty or expired
 (atomic `find_one_and_update`). A heartbeat renews held leases every
 `LEASE_RENEWAL_INTERVAL` seconds to *interval × `LEASE_TTL_MULTIPLIER`*. On
 a clean shutdown leases are released.
+
+A crashed worker's leases would otherwise block its accounts until they
+expire (up to 2 h for EnPhase). `leases.StaleLeases` remembers, across sync
+runs, the holder and `expires_at` of each lease held by another worker. If
+neither has changed for `STALE_AFTER_RENEWALS` (3) renewal intervals, the
+holder has stopped, and `take_over_account` claims the lease with a filter
+on that holder and expiry, so of several workers trying at once exactly
+one succeeds. A holder whose heartbeat was only stalled then sees
+`lost lease on …` and drops the account.
 
 `sync_accounts_job` repeats the claim every minute and brings the fetch jobs
 in line: it adds jobs for newly held accounts, reschedules changed

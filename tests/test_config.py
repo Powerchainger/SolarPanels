@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from config import Settings
 
-REQUIRED = {"MONGO_URI": "mongodb://x", "OUTPUT_API_URL": "http://x", "WORKER_ID": "w"}
+REQUIRED = {"MONGO_URI": "mongodb://x", "OUTPUT_API_URL": "http://x"}
 
 
 @pytest.fixture
@@ -53,8 +53,13 @@ def test_invalid_encryption_key_is_not_echoed_in_the_error(env):
 def test_missing_setting_does_not_echo_the_other_settings(env):
     env.setenv("ENCRYPTION_KEY", "not-a-real-key-SENTINEL")
     env.setenv("MONGO_URI", "mongodb://user:PASSWORD@host")
-    env.delenv("WORKER_ID")
+    env.delenv("OUTPUT_API_URL")
     with pytest.raises(ValidationError) as exc_info:
         _settings()
     assert "SENTINEL" not in str(exc_info.value)
     assert "PASSWORD" not in str(exc_info.value)
+
+
+def test_worker_id_is_optional(env):
+    env.delenv("WORKER_ID", raising=False)
+    assert _settings().worker_id == ""

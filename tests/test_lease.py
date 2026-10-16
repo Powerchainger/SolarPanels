@@ -325,3 +325,219 @@ async def test_heartbeat_touches_alive_file(tmp_path):
     )
 
     assert alive.exists()
+
+
+# ---------------------------------------------------------------------------
+# Worker ids and stale-lease takeover
+# ---------------------------------------------------------------------------
+
+
+def test_new_worker_id_is_unique_per_process_for_the_same_name():
+    from leases import new_worker_id
+
+    a, b = new_worker_id("worker-1"), new_worker_id("worker-1")
+    assert a != b
+    assert a.startswith("worker-1-") and b.startswith("worker-1-")
+
+
+def test_new_worker_id_falls_back_to_hostname():
+    from leases import new_worker_id
+
+    with patch("leases.socket.gethostname", return_value="c0ffee"):
+        assert new_worker_id("").startswith("c0ffee-")
+
+
+def test_stale_leases_needs_an_unchanged_lease_for_the_whole_window():
+    from leases import StaleLeases
+
+    stale = StaleLeases(stale_after=90)
+    t0 = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+    exp = t0 + timedelta(minutes=10)
+
+    assert not stale.is_stale("g::a", "w-dead", exp, t0)  # first sighting
+    assert not stale.is_stale("g::a", "w-dead", exp, t0 + timedelta(seconds=60))
+    assert stale.is_stale("g::a", "w-dead", exp, t0 + timedelta(seconds=90))
+
+
+def test_stale_leases_restarts_the_window_when_the_lease_moves():
+    from leases import StaleLeases
+
+    stale = StaleLeases(stale_after=90)
+    t0 = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+    exp = t0 + timedelta(minutes=10)
+
+    stale.is_stale("g::a", "w-live", exp, t0)
+    renewed = exp + timedelta(seconds=30)
+    assert not stale.is_stale("g::a", "w-live", renewed, t0 + timedelta(seconds=120))
+    assert not stale.is_stale("g::a", "w-live", renewed, t0 + timedelta(seconds=180))
+    assert stale.is_stale("g::a", "w-live", renewed, t0 + timedelta(seconds=210))
+    # A new holder with the same expiry is a new lease, too.
+    assert not stale.is_stale("g::a", "w-other", renewed, t0 + timedelta(seconds=300))
+
+
+def test_stale_leases_forgets_leases_no_longer_seen():
+    from leases import StaleLeases
+
+    stale = StaleLeases(stale_after=0)
+    t0 = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+    stale.is_stale("g::a", "w", t0, t0)
+    stale.keep_only(set())
+    # Seen again later: the window starts over.
+    assert not stale.is_stale("g::a", "w", t0, t0 + timedelta(hours=1))
+
+
+async def test_take_over_account_matches_the_stale_holder_and_expiry():
+    from leases import take_over_account
+
+    db = MagicMock()
+    db.api_configs.find_one_and_update = AsyncMock(return_value=_make_config())
+    old_exp = datetime(2026, 10, 16, 12, 10)
+
+    ok = await take_over_account(
+        db, "growatt", "acc-1", "w-new",
+        holder="w-dead", holder_expires_at=old_exp,
+        interval_seconds=300, ttl_multiplier=2,
+    )
+
+    assert ok is True
+    kwargs = db.api_configs.find_one_and_update.call_args.kwargs
+    assert kwargs["filter"] == {
+        "_id": "growatt::acc-1", "lease.worker_id": "w-dead", "lease.expires_at": old_exp,
+    }
+    assert kwargs["update"]["$set"]["lease"]["worker_id"] == "w-new"
+
+
+class FakeApiConfigs:
+    """In-memory api_configs supporting exactly the lease queries in leases.py.
+
+    Each call reads and writes one document without awaiting in between,
+    which is the per-document atomicity MongoDB gives find_one_and_update.
+    """
+
+    def __init__(self, docs: list[dict]) -> None:
+        self.docs = {d["_id"]: d for d in docs}
+
+    @staticmethod
+    def _get(doc: dict, path: str):
+        for part in path.split("."):
+            if not isinstance(doc, dict):
+                return None
+            doc = doc.get(part)
+        return doc
+
+    def _matches(self, doc: dict, flt: dict) -> bool:
+        for key, want in flt.items():
+            if key == "$or":
+                if not any(self._matches(doc, sub) for sub in want):
+                    return False
+                continue
+            have = self._get(doc, key)
+            if isinstance(want, dict) and "$lt" in want:
+                if have is None or not have < want["$lt"]:
+                    return False
+            elif have != want:
+                return False
+        return True
+
+    def _apply(self, doc: dict, update: dict) -> None:
+        for path, value in update["$set"].items():
+            *parents, last = path.split(".")
+            target = doc
+            for part in parents:
+                target = target[part]
+            target[last] = value
+
+    def find(self, flt: dict) -> FakeAsyncCursor:
+        import copy
+
+        return FakeAsyncCursor(
+            copy.deepcopy(d) for d in self.docs.values() if self._matches(d, flt)
+        )
+
+    async def find_one_and_update(self, filter: dict, update: dict):
+        doc = self.docs.get(filter["_id"])
+        if doc is None or not self._matches(doc, filter):
+            return None
+        before = {**doc}
+        self._apply(doc, update)
+        return before
+
+    async def update_one(self, filter: dict, update: dict):
+        doc = self.docs.get(filter["_id"])
+        ok = doc is not None and self._matches(doc, filter)
+        if ok:
+            self._apply(doc, update)
+        return MagicMock(modified_count=int(ok))
+
+
+def _fake_db(*docs: dict) -> MagicMock:
+    db = MagicMock()
+    db.api_configs = FakeApiConfigs(list(docs))
+    return db
+
+
+def _live_lease(holder: str) -> dict:
+    return {"worker_id": holder, "expires_at": datetime.now(UTC) + timedelta(minutes=10)}
+
+
+async def test_replicas_given_the_same_worker_id_do_not_share_leases():
+    """The --scale bug: identical WORKER_IDs made every replica a holder."""
+    from leases import new_worker_id
+
+    db = _fake_db(_make_config("growatt", "acc-1"), _make_config("growatt", "acc-2"))
+    first, second = new_worker_id("worker-1"), new_worker_id("worker-1")
+
+    held_first = await claim_leases(db, first, ttl_multiplier=2)
+    held_second = await claim_leases(db, second, ttl_multiplier=2)
+
+    assert {a.account_id for a in held_first} == {"acc-1", "acc-2"}
+    assert held_second == []
+    # The first replica still sees both as its own on its next sync run.
+    assert len(await claim_leases(db, first, ttl_multiplier=2)) == 2
+
+
+async def test_live_holder_keeps_its_lease_while_it_renews():
+    from leases import StaleLeases
+
+    db = _fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-live")))
+    stale = StaleLeases(stale_after=0)
+
+    for _ in range(3):
+        assert await claim_leases(db, "w-standby", ttl_multiplier=2, stale=stale) == []
+        assert await renew_lease(
+            db, "growatt", "acc-1", "w-live", interval_seconds=300, ttl_multiplier=2,
+        )
+
+    assert db.api_configs.docs["growatt::acc-1"]["lease"]["worker_id"] == "w-live"
+
+
+async def test_stopped_holder_is_taken_over_by_exactly_one_of_several_workers():
+    from leases import StaleLeases
+
+    db = _fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-dead")))
+    stales = {w: StaleLeases(stale_after=0) for w in ("w-b", "w-c", "w-d")}
+
+    # First sighting: nobody acts yet. The holder does not renew.
+    for w, stale in stales.items():
+        assert await claim_leases(db, w, ttl_multiplier=2, stale=stale) == []
+
+    # Unchanged on the second sighting: all three try at once.
+    results = await asyncio.gather(*(
+        claim_leases(db, w, ttl_multiplier=2, stale=stale) for w, stale in stales.items()
+    ))
+
+    winners = [w for w, held in zip(stales, results) if held]
+    assert len(winners) == 1
+    assert db.api_configs.docs["growatt::acc-1"]["lease"]["worker_id"] == winners[0]
+    # The dead holder's late renewal must not take it back.
+    assert not await renew_lease(
+        db, "growatt", "acc-1", "w-dead", interval_seconds=300, ttl_multiplier=2,
+    )
+
+
+async def test_takeover_is_not_attempted_without_a_stale_tracker():
+    """Boot claims only free accounts; takeovers need sightings across sync runs."""
+    db = _fake_db(_make_config("growatt", "acc-1", lease=_live_lease("w-dead")))
+
+    for _ in range(3):
+        assert await claim_leases(db, "w-new", ttl_multiplier=2) == []

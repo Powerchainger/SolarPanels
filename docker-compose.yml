@@ -35,6 +35,8 @@ services:
     env_file: .env
     environment:
       - MONGO_URI=mongodb://${MONGO_APP_USER}:${MONGO_APP_PASSWORD}@mongo:27017/solar_scraper?authSource=solar_scraper
+      # A name, not an identity: each process adds a random suffix, so
+      # `--scale app=N` replicas sharing it hold separate leases.
       - WORKER_ID=${WORKER_ID:-worker-1}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     # Must exceed SHUTDOWN_TIMEOUT_SECONDS (default 50) + 10 s (see config.py),

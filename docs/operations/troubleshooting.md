@@ -105,9 +105,9 @@ few rounds.
 
 - **Added it recently?** New accounts are picked up within a minute, and
   their first poll can take up to one interval after that.
-- **Held by an old name?** After a crash or forced stop followed by a
-  `WORKER_ID` change, an account stays reserved for the old name for
-  *poll interval × 2* (up to 2 hours for EnPhase), then is taken over.
+- **Just after a crash or forced stop?** The stopped worker's accounts are
+  taken over once its heartbeat has been missing for about three minutes
+  (`took over account … which stopped renewing its lease` in the logs).
 - **Disabled?** Check `enabled=` in `manage_keys.py list`.
 - **`last_success=never` and a growing `failures` count?** The provider call
   fails every time. Find the reason with `podman compose logs app | grep

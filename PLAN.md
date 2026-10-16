@@ -188,6 +188,12 @@ The system is designed for **multiple worker machines**, each responsible for a 
 
 **Lease / heartbeat mechanism.** Each `api_configs` document carries a `lease: {worker_id, expires_at}`. At boot a worker atomically claims all unclaimed or expired leases (`findOneAndUpdate` filtering on `expires_at < now || lease == null`). Every `lease_renewal_interval` seconds (default: half the shortest account interval, minimum 30 s) the worker renews its held leases by bumping `expires_at`. If a worker dies, its leases expire (default TTL: `2 × interval_seconds` per account) and any other worker picks them up automatically — no manual DB intervention required for failover.
 
+> **Superseded in part** (2026-10-16): the lease's `worker_id` is unique per
+> process (`WORKER_ID` or the hostname, plus a random suffix), and a lease
+> whose holder stopped renewing it is taken over after three renewal
+> intervals instead of waiting for it to expire. See
+> `docs/technical/architecture.md#leases`.
+
 **Failure buffering: central MongoDB, not per-machine.** `processed_results` stays in the central DB (as already planned). Reasons:
 - Any worker — or a future dedicated flush worker — can retry any account's failures, not just the one that created them.
 - Single source of truth for monitoring total backlog across the fleet.
@@ -316,6 +322,10 @@ The system is designed for **multiple worker machines**, each responsible for a 
 13. **Dockerfile**: `python:3.13-slim` — see "Python version" below. Multi-stage (build wheels in one stage, copy into runtime), non-root user, no compilers in final image. No CSV volume needed — Mongo is the store now.
 
 14. **docker-compose.yml**: two services (`app`, `mongo`); named volume for `mongo_data`; the app depends on mongo with a healthcheck; `.env` provides `MONGO_URI`, `OUTPUT_API_URL`, `OUTPUT_API_TOKEN` (if any), `LOG_LEVEL`, `RAW_TTL_DAYS`, `THREADPOOL_WORKERS`, `WORKER_ID`, `LEASE_TTL_MULTIPLIER`, `LEASE_RENEWAL_INTERVAL`. For multi-machine deployments the `app` service is run as separate containers on separate hosts (or as replicas in a compose stack / k8s deployment), each with a distinct `WORKER_ID`; the `mongo` service remains a single shared instance (or replica set) pointed to by all workers via `MONGO_URI`.
+
+    > **Superseded in part** (2026-10-16): `WORKER_ID` is optional and need
+    > not be distinct; replicas of one `app` service (`--scale`) are safe,
+    > because each process adds a random suffix to it.
 
 15. **Bootstrap UX for EnPhase**: `manage_keys.py` subcommands:
     - `manage_keys.py enphase bootstrap --account-id <id> --client-id … --client-secret … --redirect-uri … --auth-code … --api-key …` — performs the one-time `authorization_code` exchange (replacing `EnPhase/access_token_gen.py`) and writes the full config doc into Mongo.
