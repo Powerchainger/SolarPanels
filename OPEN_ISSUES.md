@@ -136,9 +136,9 @@ per-account opt-out also needs `--store-raw/--no-store-raw` on the two
 Behaviour that is implemented and tested but has not been observed in a
 real run yet.
 
-Several of these need the EnPhase test account, whose refresh token is
-dead (EnPhase answers 401 `invalid_token`); it is disabled until a new
-token is seeded with `manage_keys.py enphase-set`.
+The local database is empty, so these need test accounts seeded first
+(`manage_keys.py growatt-set` / `enphase-set`), with fresh tokens. The
+EnPhase checks need a working EnPhase refresh token.
 
 - [ ] **Load balancing between workers:** releasing accounts beyond a
       worker's fair share. Needs at least three enabled accounts to
